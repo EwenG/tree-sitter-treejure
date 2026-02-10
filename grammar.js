@@ -10,6 +10,7 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
+    [] 
   ],
 
   externals: $ => [
@@ -22,21 +23,19 @@ module.exports = grammar({
     $._meta_marker,           // ^
     $._unquote_marker,        // ~
     $._unquote_splicing_marker, // ~@
-    $._string_external, // Add this
-    $._erroneous_string, // A sentinel token
+    $._string_external, 
+    $._erroneous_string,
   ],
 
   rules: {
     source: $ => repeat($._form),
 
-    // Used in source roots and collections (lists, vectors, etc.)
     _form: $ => choice(
       $._visible_form,
       $.discard
     ),
 
-    // Used as the 'target' for macros and metadata
-    // This excludes 'discard' so macros don't stop at #_
+    // Excludes 'discard' so macros don't stop at #_
     _visible_form: $ => choice(
       $.with_metadata,
       $._form_base
@@ -96,8 +95,6 @@ module.exports = grammar({
       $.tagged_literal
     ),
 
-    // All macros now use _visible_form for the target 
-    // to force skipping the repeat($.discard) loop.
     quote: $ => prec.right(10, seq(
       $._quote_marker,
       repeat($.discard), 
@@ -151,16 +148,25 @@ module.exports = grammar({
       field('target', $._visible_form)
     )),
 
-    _literal: $ => choice($.number, $.string, $.regex, $.character, $.boolean, $.nil),
+    // Ensure specific literals (nil/bool) are chosen over generic external numbers/symbols
+    _literal: $ => choice(
+      $.nil,
+      $.boolean,
+      $.number,
+      $.string,
+      $.regex,
+      $.character
+    ),
+    
     nil:       $ => 'nil',
     boolean:   $ => choice('true', 'false'),
     number:    $ => $._number_external,
     string:    $ => $._string_external,
     regex:     $ => seq('#"', repeat(/[^"\\]|\\./), '"'),
-    character: $ => token(seq('\\', choice(/[a-zA-Z]+/, /./))),
+    character: $ => token(seq('\\', choice('newline', 'space', 'tab', 'formfeed', 'backspace', 'return', /[a-zA-Z]+/, /./))),
     comment:   $ => token(seq(';', /[^\n\r]*/)),
 
-    // Discard can also skip discards: #_ #_ 1 2 discards '2'
+    // Recursively handles chained discards: #_ #_ 1 2
     discard: $ => prec.right(10, seq(
       '#_', 
       repeat($.discard),
