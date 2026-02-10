@@ -101,12 +101,12 @@ static int scan_string_type(TSLexer *lexer) {
   return ERRONEOUS_STRING;
 }
 
-void *tree_sitter_clojure_external_scanner_create() { return NULL; }
-void tree_sitter_clojure_external_scanner_destroy(void *payload) {}
-unsigned tree_sitter_clojure_external_scanner_serialize(void *payload, char *buffer) { return 0; }
-void tree_sitter_clojure_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
+void *tree_sitter_treejure_external_scanner_create() { return NULL; }
+void tree_sitter_treejure_external_scanner_destroy(void *payload) {}
+unsigned tree_sitter_treejure_external_scanner_serialize(void *payload, char *buffer) { return 0; }
+void tree_sitter_treejure_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
 
-bool tree_sitter_clojure_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
+bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
   while (iswspace(lexer->lookahead) || lexer->lookahead == ',') {
     lexer->advance(lexer, true);
   }

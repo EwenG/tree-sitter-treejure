@@ -2,7 +2,7 @@ const WHITESPACE_CHAR = /[ ,\t\r\n\f\v\u00AD\u1680\u180e\u2000-\u200a\u2028\u202
 const WHITESPACE = token(repeat1(WHITESPACE_CHAR));
 
 module.exports = grammar({
-  name: 'clojure',
+  name: 'treejure',
 
   extras: $ => [
     WHITESPACE,

@@ -1,11 +1,11 @@
 {
   "grammars": [
     {
-      "name": "clojure",
-      "camelcase": "Clojure",
-      "scope": "source.clojure",
+      "name": "treejure",
+      "camelcase": "Treejure",
+      "scope": "source.treejure",
       "file-types": ["clj", "cljs", "cljc", "edn"],
-      "injection-regex": "^clojure$"
+      "injection-regex": "^treejure$"
     }
   ],
   "metadata": {
