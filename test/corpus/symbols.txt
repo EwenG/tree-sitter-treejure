@@ -1,0 +1,56 @@
+==================
+Basic Symbols
+==================
+foo foo-bar baz_quux + !? . ..
+---
+(source (symbol) (symbol) (symbol) (symbol) (symbol) (symbol) (symbol))
+
+==================
+Namespaced Symbols
+==================
+clojure.string/join ns/member
+---
+(source (symbol) (symbol))
+
+==================
+The Division Symbol
+==================
+/
+---
+(source (symbol))
+
+==================
+Keywords
+==================
+:foo :bar/baz ::auto-resolved
+---
+(source (keyword) (keyword) (keyword))
+
+==================
+Strict Symbol Errors (Should fail or be ERROR)
+==================
+foo/bar/baz
+---
+(source (symbol))
+
+==================
+No Collision with Reader Macros
+==================
+'foo ^bar @baz
+---
+(source
+  (quote
+    target: (symbol))
+  (with_metadata
+    meta: (metadata value: (symbol))
+    target: (deref
+      target: (symbol))))
+
+==================
+Metadata Missing Target (EOF)
+==================
+^:private
+---
+(source
+  (with_metadata
+    meta: (metadata value: (keyword))))

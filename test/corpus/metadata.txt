@@ -1,0 +1,14 @@
+==================
+Recursive Metadata
+==================
+^:private ^:dynamic (def x 1)
+---
+(source
+  (with_metadata
+    meta: (metadata value: (keyword))
+    target: (with_metadata
+      meta: (metadata value: (keyword))
+      target: (list_literal
+        (symbol)
+        (symbol)
+        (number)))))

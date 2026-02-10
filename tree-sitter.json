@@ -1,0 +1,15 @@
+{
+  "grammars": [
+    {
+      "name": "clojure",
+      "camelcase": "Clojure",
+      "scope": "source.clojure",
+      "file-types": ["clj", "cljs", "cljc", "edn"],
+      "injection-regex": "^clojure$"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "license": "MIT"
+  }
+}

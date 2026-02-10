@@ -1,0 +1,98 @@
+==================
+Integers
+==================
+123 -456 +789 0
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+BigInt and BigDecimal
+==================
+7N -100N 1.2M 3.14159M
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Hexadecimal and Octal
+==================
+0xff 0X1A 0777
+---
+(source
+  (number)
+  (number)
+  (number))
+
+==================
+Floating Point
+==================
+3.14 -0.5 1e10 1.2e-5 -5.5E+2
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Ratios
+==================
+22/7 -1/2 0/5
+---
+(source
+  (number)
+  (number)
+  (number))
+
+==================
+Radix Notation
+==================
+2r1010 16rDEADBEEF 36rZ 8r77
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Numbers in Collections (Boundary Check)
+==================
+(1 [2/3] {4.0 5})
+---
+(source
+  (list_literal
+    (number)
+    (vector_literal (number))
+    (map_literal
+      (pair key: (number) value: (number)))))
+
+==================
+Symbols vs Numbers (Disambiguation)
+==================
++ - / +1 -1
+---
+(source
+  (symbol)
+  (symbol)
+  (symbol)
+  (number)
+  (number))
+
+==================
+Illegal Number Suffixes (Should be Symbols)
+==================
+123abc123 1.2.3 1/2/3
+---
+(source
+  (symbol)
+  (symbol)
+  (symbol))

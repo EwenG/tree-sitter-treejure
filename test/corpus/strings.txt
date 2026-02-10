@@ -1,0 +1,71 @@
+==================
+Basic String
+==================
+"hello world"
+---
+(source (string))
+
+==================
+Empty String
+==================
+""
+---
+(source (string))
+
+==================
+String with Standard Escapes
+==================
+"line 1\nline 2\t\"quoted\""
+---
+(source (string))
+
+==================
+The Backslash Edge Case (Even)
+==================
+"C:\\"
+---
+(source (string))
+
+==================
+The Backslash Edge Case (Odd)
+==================
+"C:\\\""
+---
+(source (string))
+
+==================
+Multiline String
+==================
+"this is a
+multiline
+string"
+---
+(source (string))
+
+==================
+Unicode and Hex Escapes
+==================
+"\u0041 \x41"
+---
+(source (string))
+
+==================
+String containing Clojure forms
+==================
+"(def x 10) [1 2 3] { :a 1 }"
+---
+(source (string))
+
+==================
+Multiple Strings
+==================
+"string one" "string two"
+---
+(source (string) (string))
+
+==================
+Unterminated String (EOF Resilience)
+==================
+"unfinished
+---
+(source (ERROR))

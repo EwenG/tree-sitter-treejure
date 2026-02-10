@@ -1,0 +1,139 @@
+==================
+Macros Skipping Discards
+==================
+' #_ "ignore" 1
+---
+(source
+  (quote
+    (discard target: (string))
+    target: (number)))
+
+==================
+Recursive Quote
+==================
+''foo
+---
+(source
+  (quote
+    target: (quote
+      target: (symbol))))
+
+==================
+Macro Skipping Multiple Discards
+==================
+@ #_ 1 #_ 2 my-atom
+---
+(source
+  (deref
+    (discard target: (number))
+    (discard target: (number))
+    target: (symbol)))
+
+==================
+Metadata wrapping a Quote
+==================
+^:private 'foo
+---
+(source
+  (with_metadata
+    meta: (metadata value: (keyword))
+    target: (quote
+      target: (symbol))))
+
+==================
+Var Quote with Metadata on Target
+==================
+#' ^:dynamic my-var
+---
+(source
+  (var_quote
+    target: (with_metadata
+      meta: (metadata value: (keyword))
+      target: (symbol))))
+
+==================
+Complex Nested Macros (Unquote in Quote)
+==================
+`[~@foo]
+---
+(source
+  (syntax_quote
+    target: (vector_literal
+      (unquote_splicing
+        target: (symbol)))))
+
+==================
+Anonymous Function with Discards
+==================
+#( #_ "log" + %1 %2)
+---
+(source
+  (fn_literal
+    (discard target: (string))
+    (symbol)
+    (symbol)
+    (symbol)))
+
+==================
+Tagged Literal with Whitespace and Discard
+==================
+# uuid #_ "fixme" "550e8400-e29b-41d4-a716-446655440000"
+---
+(source
+  (tagged_literal
+    tag: (symbol)
+    (discard target: (string))
+    target: (string)))
+
+==================
+Reader Conditional with Splicing
+==================
+#?@(:clj [1 2] :cljs [3 4])
+---
+(source
+  (reader_conditional
+    marker: (marker_splicing)
+    body: (list_literal
+      (keyword) (vector_literal (number) (number))
+      (keyword) (vector_literal (number) (number)))))
+
+==================
+Deref of a Metadata wrapped Symbol
+==================
+@^:private my-atom
+---
+(source
+  (deref
+    target: (with_metadata
+      meta: (metadata value: (keyword))
+      target: (symbol))))
+
+==================
+Syntax Quote (Backtick)
+==================
+`[1 ~x]
+---
+(source
+  (syntax_quote
+    target: (vector_literal
+      (number)
+      (unquote
+        target: (symbol)))))
+
+==================
+Syntax Quote skipping discard
+==================
+` #_ ignore foo
+---
+(source
+  (syntax_quote
+    (discard target: (symbol))
+    target: (symbol)))
+
+==================
+Macro at EOF (Error)
+==================
+'
+---
+(source
+  (ERROR))
