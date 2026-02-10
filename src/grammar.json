@@ -610,19 +610,19 @@
       ]
     },
     "nil": {
-      "type": "STRING",
-      "value": "nil"
+      "type": "SYMBOL",
+      "name": "_nil"
     },
     "boolean": {
       "type": "CHOICE",
       "members": [
         {
-          "type": "STRING",
-          "value": "true"
+          "type": "SYMBOL",
+          "name": "_bool_true"
         },
         {
-          "type": "STRING",
-          "value": "false"
+          "type": "SYMBOL",
+          "name": "_bool_false"
         }
       ]
     },
@@ -755,7 +755,7 @@
         "type": "REPEAT1",
         "content": {
           "type": "PATTERN",
-          "value": "[ ,\\t\\r\\n\\f\\v\\u00AD\\u1680\\u180e\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          "value": "[ ,\\t\\r\\n\\f\\v\\u00A0\\u00AD\\u1680\\u180e\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
         }
       }
     },
@@ -764,9 +764,7 @@
       "name": "comment"
     }
   ],
-  "conflicts": [
-    []
-  ],
+  "conflicts": [],
   "precedences": [],
   "externals": [
     {
@@ -812,6 +810,18 @@
     {
       "type": "SYMBOL",
       "name": "_erroneous_string"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_nil"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_bool_true"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_bool_false"
     }
   ],
   "inline": [],

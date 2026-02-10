@@ -14,7 +14,10 @@ enum TokenType {
   UNQUOTE_MARKER,
   UNQUOTE_SPLICING_MARKER,
   STRING_EXTERNAL,
-  ERRONEOUS_STRING
+  ERRONEOUS_STRING,
+  NIL_LITERAL,
+  BOOL_TRUE,
+  BOOL_FALSE
 };
 
 static bool is_terminator(int32_t c) {
@@ -101,6 +104,19 @@ static int scan_string_type(TSLexer *lexer) {
   return ERRONEOUS_STRING;
 }
 
+// Helper to check for a specific word followed by a terminator
+static bool scan_exact_word(TSLexer *lexer, const char *word, int length, int result_type) {
+  for (int i = 0; i < length; i++) {
+    if (lexer->lookahead != word[i]) return false;
+    lexer->advance(lexer, false);
+  }
+  if (is_terminator(lexer->lookahead)) {
+    lexer->result_symbol = result_type;
+    return true;
+  }
+  return false;
+}
+
 void *tree_sitter_treejure_external_scanner_create() { return NULL; }
 void tree_sitter_treejure_external_scanner_destroy(void *payload) {}
 unsigned tree_sitter_treejure_external_scanner_serialize(void *payload, char *buffer) { return 0; }
@@ -114,6 +130,18 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (lexer->lookahead == 0) return false;
 
   int32_t first = lexer->lookahead;
+
+  // Check for nil, true, false BEFORE symbols
+  if (first == 'n' && valid_symbols[NIL_LITERAL]) {
+    if (scan_exact_word(lexer, "nil", 3, NIL_LITERAL)) return true;
+    // If it wasn't "nil", it might be a symbol "nilly", so we must handle that below
+  }
+  if (first == 't' && valid_symbols[BOOL_TRUE]) {
+    if (scan_exact_word(lexer, "true", 4, BOOL_TRUE)) return true;
+  }
+  if (first == 'f' && valid_symbols[BOOL_FALSE]) {
+    if (scan_exact_word(lexer, "false", 5, BOOL_FALSE)) return true;
+  }
 
   // Strings
   if (first == '"' && (valid_symbols[STRING_EXTERNAL] || valid_symbols[ERRONEOUS_STRING])) {

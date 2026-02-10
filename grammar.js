@@ -1,4 +1,4 @@
-const WHITESPACE_CHAR = /[ ,\t\r\n\f\v\u00AD\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+const WHITESPACE_CHAR = /[ ,\t\r\n\f\v\u00A0\u00AD\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
 const WHITESPACE = token(repeat1(WHITESPACE_CHAR));
 
 module.exports = grammar({
@@ -10,7 +10,6 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
-    [] 
   ],
 
   externals: $ => [
@@ -25,6 +24,9 @@ module.exports = grammar({
     $._unquote_splicing_marker, // ~@
     $._string_external, 
     $._erroneous_string,
+    $._nil,
+    $._bool_true, 
+    $._bool_false
   ],
 
   rules: {
@@ -157,9 +159,9 @@ module.exports = grammar({
       $.regex,
       $.character
     ),
-    
-    nil:       $ => 'nil',
-    boolean:   $ => choice('true', 'false'),
+
+    nil: $ => $._nil,
+    boolean: $ => choice($._bool_true, $._bool_false),
     number:    $ => $._number_external,
     string:    $ => $._string_external,
     regex:     $ => seq('#"', repeat(/[^"\\]|\\./), '"'),

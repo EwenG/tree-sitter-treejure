@@ -475,6 +475,11 @@
     }
   },
   {
+    "type": "nil",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "number",
     "named": true,
     "fields": {}
@@ -1880,24 +1885,12 @@
     "extra": true
   },
   {
-    "type": "false",
-    "named": false
-  },
-  {
     "type": "marker",
     "named": true
   },
   {
     "type": "marker_splicing",
     "named": true
-  },
-  {
-    "type": "nil",
-    "named": true
-  },
-  {
-    "type": "true",
-    "named": false
   },
   {
     "type": "{",
