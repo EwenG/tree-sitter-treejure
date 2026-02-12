@@ -87,8 +87,19 @@ module.exports = grammar({
     list_literal:   $ => seq('(', repeat($._form), ')'),
     vector_literal: $ => seq('[', repeat($._form), ']'),
     set_literal:    $ => seq('#{', repeat($._form), '}'),
-    map_literal:    $ => seq('{', repeat($.pair), '}'),
-    pair:           $ => seq(field('key', $._form), field('value', $._form)),
+    map_literal: $ => seq(
+      '{',
+      repeat(choice(
+        $.pair,
+        $.discard
+      )),
+      '}'
+    ),
+    pair: $ => seq(
+      field('key', $._visible_form),
+      repeat($.discard), // This allows {:a #_ "ignore" 1} to be valid
+      field('value', $._visible_form)
+    ),
 
     _identifier: $ => choice($.symbol, $.keyword),
     symbol:  $ => $._symbol_external,

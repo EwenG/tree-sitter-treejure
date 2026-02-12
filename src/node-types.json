@@ -475,6 +475,10 @@
       "required": false,
       "types": [
         {
+          "type": "discard",
+          "named": true
+        },
+        {
           "type": "pair",
           "named": true
         }
@@ -536,19 +540,7 @@
             "named": true
           },
           {
-            "type": "discard",
-            "named": true
-          },
-          {
             "type": "fn_literal",
-            "named": true
-          },
-          {
-            "type": "invalid_character",
-            "named": true
-          },
-          {
-            "type": "invalid_number",
             "named": true
           },
           {
@@ -642,19 +634,7 @@
             "named": true
           },
           {
-            "type": "discard",
-            "named": true
-          },
-          {
             "type": "fn_literal",
-            "named": true
-          },
-          {
-            "type": "invalid_character",
-            "named": true
-          },
-          {
-            "type": "invalid_number",
             "named": true
           },
           {
@@ -731,6 +711,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "discard",
+          "named": true
+        }
+      ]
     }
   },
   {
