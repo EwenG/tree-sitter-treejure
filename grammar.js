@@ -1,3 +1,5 @@
+// A precise set of Clojure whitespace: 
+// standard \s (space, tab, newline, etc) + comma + specific Unicode separators
 const WHITESPACE_CHAR = /[ ,\t\r\n\f\v\u00A0\u00AD\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
 const WHITESPACE = token(repeat1(WHITESPACE_CHAR));
 

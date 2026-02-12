@@ -22,8 +22,19 @@ enum TokenType {
   ERRONEOUS_CHARACTER
 };
 
+static bool is_clojure_whitespace(int32_t c) {
+  return c == ' '  || c == '\t' || c == '\r' || c == '\n' || 
+         c == ','  || c == '\f' || c == '\v' ||
+         c == 0xA0 || // non-breaking space
+         c == 0xAD || // soft hyphen
+         (c >= 0x2000 && c <= 0x200A) || // various thin/hair spaces
+         c == 0x2028 || c == 0x2029 ||   // line/para separators
+         c == 0x202F || c == 0x205F || c == 0x3000 || c == 0x1680 || c == 0x180E;
+}
+
+// Update is_terminator to use our new helper
 static bool is_terminator(int32_t c) {
-  return iswspace(c) || c == L',' ||
+  return is_clojure_whitespace(c) ||
          c == L'(' || c == L')' || c == L'[' || c == L']' || 
          c == L'{' || c == L'}' || c == L'"' || c == L';' || c == 0;
 }
@@ -183,7 +194,7 @@ unsigned tree_sitter_treejure_external_scanner_serialize(void *payload, char *bu
 void tree_sitter_treejure_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
 
 bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
-  while (iswspace(lexer->lookahead) || lexer->lookahead == ',') {
+  while (is_clojure_whitespace(lexer->lookahead)) {
     lexer->advance(lexer, true);
   }
 
