@@ -192,4 +192,4 @@ Invalid Characters (Compiler Check)
 \abc
 ---
 (source
-  (ERROR))
+  (invalid_character))

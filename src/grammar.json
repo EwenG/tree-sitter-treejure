@@ -19,6 +19,10 @@
         {
           "type": "SYMBOL",
           "name": "discard"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "invalid_character"
         }
       ]
     },
@@ -701,6 +705,10 @@
           }
         ]
       }
+    },
+    "invalid_character": {
+      "type": "SYMBOL",
+      "name": "_erroneous_character"
     }
   },
   "extras": [

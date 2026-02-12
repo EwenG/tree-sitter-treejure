@@ -21,70 +21,53 @@ static bool is_clojure_whitespace(int32_t c) {
          c == 0x202F || c == 0x205F || c == 0x3000 || c == 0x1680 || c == 0x180E;
 }
 
-// Mirroring lijeur's macroMask (forbids starting symbols/numbers)
 static bool is_macro(int32_t c) {
-  return c == '"' || c == ':' || c == ';' || c == '\'' || c == '@' || 
-         c == '^' || c == '`' || c == '~' || c == '(' || c == ')' || 
-         c == '[' || c == ']' || c == '{' || c == '}' || c == '\\' || 
-         c == '#'; 
-         // Note: '%' removed from here. In Clojure, symbols can start with '%'
+    return c == '"' || c == ':' || c == ';' || c == '\'' || c == '@' || 
+           c == '^' || c == '`' || c == '~' || c == '(' || c == ')' || 
+           c == '[' || c == ']' || c == '{' || c == '}' || c == '\\' || 
+           c == '#';
 }
 
-// Mirroring lijeur's macroTerminatingMask (ends symbols/keywords)
+/**
+ * macroTerminatingMask - Matches LispReader.isTerminatingMacro(ch)
+ * Excludes '#', '\'', and ':' so they can be internal to symbols.
+ */
 static bool is_macro_terminating(int32_t c) {
-  return c == '"' || c == ';' || c == '@' || 
-         c == '^' || c == '`' || c == '~' || c == '(' || c == ')' || 
-         c == '[' || c == ']' || c == '{' || c == '}' || c == '\\';
+    // Check if it's a macro first
+    if (!is_macro(c)) return false;
+    // Exclude the non-terminating ones
+    return (c != '#' && c != '\'' && c != ':');
 }
 
+/**
+ * Number Boundary - Numbers stop at ANY macro.
+ */
+static bool is_number_end(int32_t c) {
+    return c == 0 || is_clojure_whitespace(c) || is_macro(c);
+}
+
+/**
+ * Identifier Boundary - Symbols/Keywords stop at whitespace or terminating macros.
+ */
 static bool is_token_end(int32_t c) {
-  return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
+    return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
 }
 
 // COMPILER-GRADE NUMBER SCANNER
 static bool finish_number(TSLexer *lexer, bool has_digits) {
-  bool is_ratio = false;
-  bool is_float = false;
-  bool is_hex = false;
-  bool is_radix = false;
-
-  // 1. Handle Hex/Octal Prefix
+  bool is_hex = false, is_radix = false;
   if (!has_digits && lexer->lookahead == '0') {
-    has_digits = true;
-    lexer->advance(lexer, false);
-    if (lexer->lookahead == 'x' || lexer->lookahead == 'X') {
-      is_hex = true;
-      lexer->advance(lexer, false);
-    }
+    has_digits = true; lexer->advance(lexer, false);
+    if (lexer->lookahead == 'x' || lexer->lookahead == 'X') { is_hex = true; lexer->advance(lexer, false); }
   }
-
-  // 2. Main Loop
-  while (!is_token_end(lexer->lookahead)) {
+  while (!is_number_end(lexer->lookahead)) {
     int32_t c = lexer->lookahead;
-
-    if (isdigit(c)) {
-      has_digits = true;
-    } else if (is_hex && iswxdigit(c)) {
-      has_digits = true;
-    } else if (c == '.' && !is_hex && !is_ratio && !is_float) {
-      is_float = true;
-    } else if (c == '/' && !is_hex && !is_float && !is_ratio) {
-      is_ratio = true;
-    } else if ((c == 'e' || c == 'E') && !is_hex && !is_ratio) {
-      is_float = true;
-      lexer->advance(lexer, false);
-      if (lexer->lookahead == '+' || lexer->lookahead == '-') lexer->advance(lexer, false);
-      continue; 
-    } else if ((c == 'r' || c == 'R') && has_digits && !is_radix && !is_float && !is_ratio && !is_hex) {
-      is_radix = true;
-    } else if (is_radix && iswalnum(c)) {
-      has_digits = true;
-    } else if ((c == 'N' || c == 'M') && has_digits) {
-      lexer->advance(lexer, false);
-      return is_token_end(lexer->lookahead);
-    } else {
-      return false; // Backtrack to symbol
-    }
+    if (isdigit(c)) has_digits = true;
+    else if (is_hex && isxdigit(c)) has_digits = true;
+    else if ((c == 'r' || c == 'R') && has_digits && !is_radix) is_radix = true;
+    else if (is_radix && iswalnum(c)) has_digits = true;
+    else if (c == '.' || c == '/' || c == 'e' || c == 'E' || c == 'M' || c == 'N' || c == '+' || c == '-') {}
+    else return false;
     lexer->advance(lexer, false);
   }
   return has_digits;
@@ -93,16 +76,17 @@ static bool finish_number(TSLexer *lexer, bool has_digits) {
 static int scan_character_type(TSLexer *lexer) {
   lexer->advance(lexer, false); // Consume \ 
   if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
-
-  char buffer[32];
-  int i = 0;
-  buffer[i++] = (char)lexer->lookahead;
+  
+  char buffer[32]; int i = 0;
+  buffer[i++] = (char)lexer->lookahead; 
   lexer->advance(lexer, false);
 
-  // If followed by space or macro, it's a 1-char literal (e.g. \()
+  // If immediately followed by a terminator (like @ or (), but NOT ' or :)
+  // we treat it as a single-character literal.
   if (is_token_end(lexer->lookahead)) return CHARACTER_EXTERNAL;
 
-  // Read word
+  // Read word until a terminating macro.
+  // Because ' and : are NOT terminating, \newline'bar reads "newline'bar"
   while (!is_token_end(lexer->lookahead) && i < 31) {
     buffer[i++] = (char)lexer->lookahead;
     lexer->advance(lexer, false);
@@ -111,27 +95,18 @@ static int scan_character_type(TSLexer *lexer) {
 
   if (strcmp(buffer, "newline") == 0 || strcmp(buffer, "space") == 0 ||
       strcmp(buffer, "tab") == 0 || strcmp(buffer, "formfeed") == 0 ||
-      strcmp(buffer, "backspace") == 0 || strcmp(buffer, "return") == 0) {
-    return CHARACTER_EXTERNAL;
-  }
+      strcmp(buffer, "backspace") == 0 || strcmp(buffer, "return") == 0) return CHARACTER_EXTERNAL;
 
-  // Unicode \uXXXX
   if (i == 5 && buffer[0] == 'u') {
     for (int j = 1; j < 5; j++) if (!isxdigit(buffer[j])) return ERRONEOUS_CHARACTER;
     return CHARACTER_EXTERNAL;
   }
-
-  // Octal \oXXX
-  if (buffer[0] == 'o') {
-    if (i < 2 || i > 4) return ERRONEOUS_CHARACTER;
+  if (buffer[0] == 'o' && i > 1 && i < 5) {
     for (int j = 1; j < i; j++) if (buffer[j] < '0' || buffer[j] > '7') return ERRONEOUS_CHARACTER;
     return CHARACTER_EXTERNAL;
   }
-
   return ERRONEOUS_CHARACTER;
 }
-
-// ... scan_string_type and scan_exact_word remain the same ...
 
 static bool scan_identifier(TSLexer *lexer, int char_count, int result_type) {
   while (!is_token_end(lexer->lookahead)) {
@@ -230,7 +205,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   }
 
   // 7. Symbols (Catch-all)
-  if (valid_symbols[SYMBOL] && !is_macro(first)) {
+  if (valid_symbols[SYMBOL] && !is_macro(first) && !isdigit(first)) {
     return scan_identifier(lexer, 0, SYMBOL);
   }
 

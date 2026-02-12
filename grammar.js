@@ -40,7 +40,8 @@ module.exports = grammar({
 
     _form: $ => choice(
       $._visible_form,
-      $.discard
+      $.discard,
+      $.invalid_character
     ),
 
     // Excludes 'discard' so macros don't stop at #_
@@ -180,5 +181,7 @@ module.exports = grammar({
       repeat($.discard),
       field('target', $._visible_form)
     )),
+
+    invalid_character: $ => $._erroneous_character,
   }
 });

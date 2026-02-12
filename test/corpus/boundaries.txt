@@ -1,0 +1,107 @@
+========================================
+Symbol Boundaries (Non-Terminating Macros)
+Symbols can contain ':' inside because it is not in macroTerminatingMask
+========================================
+foo:bar :colon:inside:
+---
+(source
+  (symbol)
+  (keyword))
+
+========================================
+Single Quote inside Symbol
+========================================
+foo'bar
+---
+(source (symbol))
+
+========================================
+Single Quote as Macro (Prefix)
+========================================
+'foo
+---
+(source (quote target: (symbol)))
+
+========================================
+Backslash as Terminating Macro
+========================================
+foo\b
+---
+(source
+  (symbol)
+  (character))
+
+========================================
+Symbol Boundaries (Terminating Macros)
+Symbols must stop at parens, etc.
+========================================
+foo(bar)
+foo@bar
+---
+(source
+  (symbol)
+  (list_literal (symbol))
+  (symbol)
+  (deref target: (symbol)))
+
+========================================
+Number Boundaries (Strict Macro Mask)
+Numbers stop at ANY macro, including ':' or '#'
+In '123:foo', the number reader stops at ':' 
+and the next token is a keyword.
+========================================
+123:foo
+456#bar
+---
+(source
+  (number)
+  (keyword)
+  (number)
+  (tagged_literal tag: (symbol) target: (symbol)))
+
+========================================
+Keyword Boundaries
+Keywords, like symbols, can contain ':'
+========================================
+:foo:bar/baz:qux
+---
+(source (keyword))
+
+========================================
+Character Word Boundaries
+Character names stop at terminating macros
+========================================
+\space(foo)
+\newline@bar
+\newline'bar
+\newline:bar
+---
+(source
+  (character)
+  (list_literal (symbol))
+  (character)
+  (deref target: (symbol))
+  (invalid_character)
+  (invalid_character))
+
+========================================
+Dispatch and Boundary Interactions
+Ensure #uuid"..." works (Number/Symbol would stop at ")
+========================================
+#uuid"550e8400-e29b-41d4-a716-446655440000"
+---
+(source
+  (tagged_literal
+    tag: (symbol)
+    target: (string)))
+
+========================================
+Symbol Start with % (is_macro check)
+We removed % from is_macro so these must be symbols
+========================================
+% %1 %&
+---
+(source
+  (symbol)
+  (symbol)
+  (symbol))
