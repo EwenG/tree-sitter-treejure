@@ -1,0 +1,31 @@
+==================
+Booleans and Nil
+==================
+true false nil
+---
+(source
+  (boolean)
+  (boolean)
+  (nil))
+
+==================
+Boolean/Nil vs Symbols
+==================
+true? false-value nilly
+---
+(source
+  (symbol)
+  (symbol)
+  (symbol))
+
+==================
+Booleans in Collections
+==================
+[true [false] {nil true}]
+---
+(source
+  (vector_literal
+    (boolean)
+    (vector_literal (boolean))
+    (map_literal
+      (pair key: (nil) value: (boolean)))))

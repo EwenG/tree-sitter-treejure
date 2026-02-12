@@ -1,0 +1,58 @@
+==================
+Basic Keywords
+==================
+:foo :bar-baz :* :+ :? :. :..
+---
+(source (keyword) (keyword) (keyword) (keyword) (keyword) (keyword) (keyword))
+
+==================
+Namespaced Keywords
+==================
+:ns/foo :my.ns/bar
+---
+(source (keyword) (keyword))
+
+==================
+Auto-resolved Keywords
+==================
+::foo ::my-ns/bar
+---
+(source (keyword) (keyword))
+
+==================
+Numeric Keywords
+==================
+:1 :123 :45foo
+---
+(source (keyword) (keyword) (keyword))
+
+==================
+Keywords in Maps
+==================
+{:key "value" :a 1}
+---
+(source
+  (map_literal
+    (pair key: (keyword) value: (string))
+    (pair key: (keyword) value: (number))))
+
+==================
+Metadata with Keywords
+==================
+^:private (def x 1)
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (keyword))
+    target: (list_literal
+      (symbol)
+      (symbol)
+      (number))))
+
+==================
+3 slashes, not an error
+==================
+:a/b/c
+---
+(source (keyword))

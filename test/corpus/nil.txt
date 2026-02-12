@@ -1,0 +1,52 @@
+==================
+Nil Literal
+==================
+nil
+---
+(source
+  (nil))
+
+==================
+Nil in Vector
+==================
+[nil]
+---
+(source
+  (vector_literal
+    (nil)))
+
+==================
+Nil in List
+==================
+(nil)
+---
+(source
+  (list_literal
+    (nil)))
+
+==================
+Nil mixed with booleans
+==================
+[nil true false]
+---
+(source
+  (vector_literal
+    (nil)
+    (boolean)
+    (boolean)))
+
+==================
+Symbol starting with nil (nil?)
+==================
+nil?
+---
+(source
+  (symbol))
+
+==================
+Symbol containing nil (not-nil)
+==================
+not-nil
+---
+(source
+  (symbol))
