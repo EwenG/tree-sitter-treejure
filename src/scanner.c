@@ -11,7 +11,8 @@ enum TokenType {
   NIL_LITERAL, BOOL_TRUE, BOOL_FALSE,
   CHARACTER_EXTERNAL, ERRONEOUS_CHARACTER,
   ERRONEOUS_KEYWORD, ERRONEOUS_SYMBOL,
-  ERRONEOUS_NUMBER
+  ERRONEOUS_NUMBER,
+  REGEX_EXTERNAL
 };
 
 static bool is_clojure_whitespace(int32_t c) {
@@ -102,7 +103,7 @@ number_error:
 }
 
 static int scan_character_type(TSLexer *lexer) {
-  lexer->advance(lexer, false); // Consume \ 
+  lexer->advance(lexer, false); // Consume "\" 
   if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
   
   char buffer[32]; int i = 0;
@@ -144,14 +145,21 @@ static bool scan_identifier(TSLexer *lexer, int char_count, int result_type) {
   return false;
 }
 
-static int scan_string_type(TSLexer *lexer) {
-  lexer->advance(lexer, false);
+static int finish_string_content(TSLexer *lexer, int success_type) {
   bool escaped = false;
   while (lexer->lookahead != 0) {
-    if (escaped) { lexer->advance(lexer, false); escaped = false; }
-    else if (lexer->lookahead == '\\') { lexer->advance(lexer, false); escaped = true; }
-    else if (lexer->lookahead == '"') { lexer->advance(lexer, false); return STRING_EXTERNAL; }
-    else lexer->advance(lexer, false);
+    if (escaped) {
+      lexer->advance(lexer, false);
+      escaped = false;
+    } else if (lexer->lookahead == '\\') {
+      lexer->advance(lexer, false);
+      escaped = true;
+    } else if (lexer->lookahead == '"') {
+      lexer->advance(lexer, false); // Consume closing "
+      return success_type;
+    } else {
+      lexer->advance(lexer, false);
+    }
   }
   return ERRONEOUS_STRING;
 }
@@ -175,8 +183,26 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (lexer->lookahead == 0) return false;
   int32_t first = lexer->lookahead;
 
+  if (first == '#') {
+    lexer->advance(lexer, false); // consume #
+    
+    // Check if it's a regex
+    if (lexer->lookahead == '"' && valid_symbols[REGEX_EXTERNAL]) {
+      lexer->advance(lexer, false); // consume "
+      lexer->result_symbol = finish_string_content(lexer, REGEX_EXTERNAL);
+      return true;
+    }
+    
+    // If it was just a symbol with # (like foo#), we cannot consume it here.
+    // However, if we've already advanced, Tree-sitter won't let us "un-advance".
+    // This is why # dispatches should ideally check lookahead BEFORE advancing.
+    // For now, if we don't find a regex, return false to let other rules try.
+    return false; 
+  }
   if (first == '"' && (valid_symbols[STRING_EXTERNAL] || valid_symbols[ERRONEOUS_STRING])) {
-    lexer->result_symbol = scan_string_type(lexer); return true;
+    lexer->advance(lexer, false); // consume "
+    lexer->result_symbol = finish_string_content(lexer, STRING_EXTERNAL);
+    return true;
   }
   if (first == '\\' && (valid_symbols[CHARACTER_EXTERNAL] || valid_symbols[ERRONEOUS_CHARACTER])) {
     lexer->result_symbol = scan_character_type(lexer); return true;

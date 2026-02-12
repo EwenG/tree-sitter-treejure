@@ -29,3 +29,40 @@ Booleans in Collections
     (vector_literal (boolean))
     (map_literal
       (pair key: (nil) value: (boolean)))))
+
+==================
+Basic Regex
+==================
+#"^[a-z]+$"
+---
+(source (regex))
+
+==================
+Regex with Escaped Quote
+==================
+#"abc\"def"
+---
+(source (regex))
+
+==================
+Regex with Escaped Backslash (Boundary Check)
+==================
+#"\\\\"
+---
+(source (regex))
+
+==================
+Regex containing Clojure delimiters
+==================
+#"[()\[\]{}]"
+---
+(source (regex))
+
+==================
+Illegal Regex Gap
+==================
+# "should be symbol then string"
+---
+(source 
+  (ERROR)
+  (string))

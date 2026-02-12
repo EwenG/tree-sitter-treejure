@@ -33,7 +33,8 @@ module.exports = grammar({
     $._erroneous_character,
     $._erroneous_keyword,
     $._erroneous_symbol,
-    $._erroneous_number
+    $._erroneous_number,
+    $._regex_external,
   ],
 
   rules: {
@@ -169,11 +170,11 @@ module.exports = grammar({
       $.character
     ),
 
-    nil: $ => $._nil,
-    boolean: $ => choice($._bool_true, $._bool_false),
+    nil:       $ => $._nil,
+    boolean:   $ => choice($._bool_true, $._bool_false),
     number:    $ => $._number_external,
     string:    $ => $._string_external,
-    regex:     $ => seq('#"', repeat(/[^"\\]|\\./), '"'),
+    regex:     $ => $._regex_external,
     character: $ => $._character_external,
     comment:   $ => token(seq(';', /[^\n\r]*/)),
 

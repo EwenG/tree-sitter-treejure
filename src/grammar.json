@@ -643,24 +643,8 @@
       "name": "_string_external"
     },
     "regex": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "#\""
-        },
-        {
-          "type": "REPEAT",
-          "content": {
-            "type": "PATTERN",
-            "value": "[^\"\\\\]|\\\\."
-          }
-        },
-        {
-          "type": "STRING",
-          "value": "\""
-        }
-      ]
+      "type": "SYMBOL",
+      "name": "_regex_external"
     },
     "character": {
       "type": "SYMBOL",
@@ -813,6 +797,10 @@
     {
       "type": "SYMBOL",
       "name": "_erroneous_number"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_regex_external"
     }
   ],
   "inline": [],
