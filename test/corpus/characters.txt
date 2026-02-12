@@ -1,0 +1,195 @@
+==================
+Character Named - newline
+==================
+\newline
+---
+(source
+  (character))
+
+==================
+Character Named - space
+==================
+\space
+---
+(source
+  (character))
+
+==================
+Character Named - tab
+==================
+\tab
+---
+(source
+  (character))
+
+==================
+Character Named - formfeed
+==================
+\formfeed
+---
+(source
+  (character))
+
+==================
+Character Named - backspace
+==================
+\backspace
+---
+(source
+  (character))
+
+==================
+Character Named - return
+==================
+\return
+---
+(source
+  (character))
+
+==================
+Character Single - letters
+==================
+[\a \b \c \z]
+---
+(source
+  (vector_literal
+    (character)
+    (character)
+    (character)
+    (character)))
+
+==================
+Character Single - punctuation
+==================
+[\! \? \. \,]
+---
+(source
+  (vector_literal
+    (character)
+    (character)
+    (character)
+    (character)))
+
+==================
+Character Single - digits
+==================
+[\0 \1 \9]
+---
+(source
+  (vector_literal
+    (character)
+    (character)
+    (character)))
+
+==================
+Character Single - special chars
+==================
+[\( \) \[ \] \{ \}]
+---
+(source
+  (vector_literal
+    (character)
+    (character)
+    (character)
+    (character)
+    (character)
+    (character)))
+
+==================
+Character Unicode sequences
+==================
+[\uABCD \u0041]
+---
+(source
+  (vector_literal
+    (character)
+    (character)))
+
+==================
+Characters in List
+==================
+(\newline \space \tab)
+---
+(source
+  (list_literal
+    (character)
+    (character)
+    (character)))
+
+==================
+Characters in Map
+==================
+{:newline \newline :space \space}
+---
+(source
+  (map_literal
+    (pair
+      (keyword)
+      (character))
+    (pair
+      (keyword)
+      (character))))
+
+==================
+Characters in Set
+==================
+#{\a \b \c}
+---
+(source
+  (set_literal
+    (character)
+    (character)
+    (character)))
+
+==================
+Character with Metadata
+==================
+^:meta \a
+---
+(source
+  (with_metadata
+    (metadata
+      (keyword))
+    (character)))
+
+==================
+Quoted Character
+==================
+'\newline
+---
+(source
+  (quote
+    (character)))
+
+==================
+Characters Mixed with Other Literals
+==================
+[1 \a "string" \newline true]
+---
+(source
+  (vector_literal
+    (number)
+    (character)
+    (string)
+    (character)
+    (boolean)))
+
+==================
+Characters
+==================
+\a \newline \space \u0041 \o377
+---
+(source
+  (character)
+  (character)
+  (character)
+  (character)
+  (character))
+
+==================
+Invalid Characters (Compiler Check)
+==================
+\abc
+---
+(source
+  (ERROR))

@@ -17,7 +17,9 @@ enum TokenType {
   ERRONEOUS_STRING,
   NIL_LITERAL,
   BOOL_TRUE,
-  BOOL_FALSE
+  BOOL_FALSE,
+  CHARACTER_EXTERNAL,
+  ERRONEOUS_CHARACTER
 };
 
 static bool is_terminator(int32_t c) {
@@ -75,13 +77,16 @@ static bool finish_number(TSLexer *lexer, bool has_digits) {
   return has_digits;
 }
 
-static bool finish_symbol(TSLexer *lexer, int char_count, int slash_count) {
+static bool scan_identifier(TSLexer *lexer, int char_count, int result_type) {
   while (lexer->lookahead != 0 && !is_terminator(lexer->lookahead)) {
-    if (lexer->lookahead == '/') slash_count++;
     lexer->advance(lexer, false);
     char_count++;
   }
-  return char_count > 0;
+  if (char_count > 0) {
+    lexer->result_symbol = result_type;
+    return true;
+  }
+  return false;
 }
 
 static int scan_string_type(TSLexer *lexer) {
@@ -102,6 +107,61 @@ static int scan_string_type(TSLexer *lexer) {
     }
   }
   return ERRONEOUS_STRING;
+}
+
+static int scan_character_type(TSLexer *lexer) {
+  lexer->advance(lexer, false); // Consume the backslash '\'
+
+  // If backslash is the last character in the file, it's an error
+  if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
+
+  char buffer[32];
+  int i = 0;
+
+  // RULE: The first character after '\' is ALWAYS part of the literal,
+  // even if it is a terminator like ',' or '(' or ' '.
+  buffer[i++] = (char)lexer->lookahead;
+  lexer->advance(lexer, false);
+
+  // If the next character is a terminator, then this was a single-character 
+  // literal (like '\,' or '\a' or '\('). We are done.
+  if (is_terminator(lexer->lookahead)) {
+    return CHARACTER_EXTERNAL;
+  }
+
+  // Otherwise, it might be a named character like "\newline" or "\space"
+  while (!is_terminator(lexer->lookahead) && i < 31) {
+    buffer[i++] = (char)lexer->lookahead;
+    lexer->advance(lexer, false);
+  }
+  buffer[i] = '\0';
+
+  // 1. Named characters
+  if (strcmp(buffer, "newline") == 0 ||
+      strcmp(buffer, "space") == 0 ||
+      strcmp(buffer, "tab") == 0 ||
+      strcmp(buffer, "formfeed") == 0 ||
+      strcmp(buffer, "backspace") == 0 ||
+      strcmp(buffer, "return") == 0) {
+    return CHARACTER_EXTERNAL;
+  }
+
+  // 2. Unicode (uXXXX)
+  if (i == 5 && buffer[0] == 'u') {
+    bool valid = true;
+    for (int j = 1; j < 5; j++) if (!isxdigit(buffer[j])) valid = false;
+    if (valid) return CHARACTER_EXTERNAL;
+  }
+
+  // 3. Octal (oXXX)
+  if (i == 4 && buffer[0] == 'o') {
+    bool valid = true;
+    for (int j = 1; j < 4; j++) if (buffer[j] < '0' || buffer[j] > '7') valid = false;
+    if (valid) return CHARACTER_EXTERNAL;
+  }
+
+  // 4. If it's a multi-character word that isn't a valid name, it's an error (e.g. \abc)
+  return ERRONEOUS_CHARACTER;
 }
 
 // Helper to check for a specific word followed by a terminator
@@ -141,6 +201,12 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   }
   if (first == 'f' && valid_symbols[BOOL_FALSE]) {
     if (scan_exact_word(lexer, "false", 5, BOOL_FALSE)) return true;
+  }
+
+  // Character
+  if (first == '\\' && (valid_symbols[CHARACTER_EXTERNAL] || valid_symbols[ERRONEOUS_CHARACTER])) {
+    lexer->result_symbol = scan_character_type(lexer);
+    return true; // Return true to prevent backtracking
   }
 
   // Strings
@@ -193,35 +259,20 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   }
 
   // KEYWORDS
-  if (valid_symbols[KEYWORD] && first == ':') {
+  if (first == ':' && valid_symbols[KEYWORD]) {
     lexer->advance(lexer, false);
-    int char_count = 1;
-    // Handle ::keyword
-    if (lexer->lookahead == ':') { lexer->advance(lexer, false); char_count++; }
-    
-    // We pass 0 for char_count because we've effectively consumed the prefix
-    // and just want to scan the body.
-    if (finish_symbol(lexer, char_count, 0)) {
-      lexer->result_symbol = KEYWORD;
-      return true;
-    }
-    return false;
+    int c = 1;
+    if (lexer->lookahead == ':') { lexer->advance(lexer, false); c++; }
+    return scan_identifier(lexer, c, KEYWORD);
   }
 
   // DISAMBIGUATE SIGN (+ or -)
   if (first == '+' || first == '-') {
     lexer->advance(lexer, false);
-    
-    // Check if it's a number
     if (isdigit(lexer->lookahead) && valid_symbols[NUMBER]) {
       if (finish_number(lexer, true)) { lexer->result_symbol = NUMBER; return true; }
     }
-    
-    // Check if it's a symbol
-    if (valid_symbols[SYMBOL]) {
-      // finish_symbol checking 1 char (the sign we just ate)
-      if (finish_symbol(lexer, 1, 0)) { lexer->result_symbol = SYMBOL; return true; }
-    }
+    if (valid_symbols[SYMBOL]) return scan_identifier(lexer, 1, SYMBOL);
     return false;
   }
 
@@ -231,11 +282,8 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   }
 
   // SYMBOLS
-  if (valid_symbols[SYMBOL] && !is_reader_macro(first) && !(first == L'"')) {
-    if (finish_symbol(lexer, 0, 0)) {
-      lexer->result_symbol = SYMBOL;
-      return true;
-    }
+  if (valid_symbols[SYMBOL] && !is_reader_macro(first)) {
+    return scan_identifier(lexer, 0, SYMBOL);
   }
 
   return false;

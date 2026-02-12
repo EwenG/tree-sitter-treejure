@@ -5,6 +5,11 @@
     "fields": {}
   },
   {
+    "type": "character",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "deref",
     "named": true,
     "fields": {
@@ -1874,10 +1879,6 @@
   {
     "type": "]",
     "named": false
-  },
-  {
-    "type": "character",
-    "named": true
   },
   {
     "type": "comment",

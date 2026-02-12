@@ -1,0 +1,92 @@
+==================
+Boolean True
+==================
+true
+---
+(source
+  (boolean))
+
+==================
+Boolean False
+==================
+false
+---
+(source
+  (boolean))
+
+==================
+Booleans in Vector
+==================
+[true false]
+---
+(source
+  (vector_literal
+    (boolean)
+    (boolean)))
+
+==================
+Booleans in List
+==================
+(true false)
+---
+(source
+  (list_literal
+    (boolean)
+    (boolean)))
+
+==================
+Booleans in Map
+==================
+{:enabled true :disabled false}
+---
+(source
+  (map_literal
+    (pair
+      (keyword)
+      (boolean))
+    (pair
+      (keyword)
+      (boolean))))
+
+==================
+Booleans in Set
+==================
+#{true false}
+---
+(source
+  (set_literal
+    (boolean)
+    (boolean)))
+
+==================
+Booleans with Metadata
+==================
+^:meta true
+---
+(source
+  (with_metadata
+    (metadata
+      (keyword))
+    (boolean)))
+
+==================
+Quoted Boolean
+==================
+'true
+---
+(source
+  (quote
+    (boolean)))
+
+==================
+Booleans Mixed with Other Literals
+==================
+[1 true "string" false nil]
+---
+(source
+  (vector_literal
+    (number)
+    (boolean)
+    (string)
+    (boolean)
+    (nil)))

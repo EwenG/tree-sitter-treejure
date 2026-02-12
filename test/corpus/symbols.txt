@@ -20,6 +20,13 @@ The Division Symbol
 (source (symbol))
 
 ==================
+The Plus Symbol
+==================
++ +foo/bar
+---
+(source (symbol) (symbol))
+
+==================
 Keywords
 ==================
 :foo :bar/baz ::auto-resolved
@@ -27,7 +34,7 @@ Keywords
 (source (keyword) (keyword) (keyword))
 
 ==================
-Strict Symbol Errors (Should fail or be ERROR)
+3 slashes, not an error
 ==================
 foo/bar/baz
 ---
@@ -54,3 +61,4 @@ Metadata Missing Target (EOF)
 (source
   (with_metadata
     meta: (metadata value: (keyword))))
+

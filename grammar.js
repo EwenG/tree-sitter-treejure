@@ -26,7 +26,11 @@ module.exports = grammar({
     $._erroneous_string,
     $._nil,
     $._bool_true, 
-    $._bool_false
+    $._bool_false,
+    $._character_external,
+    $._erroneous_character,
+    $._erroneous_keyword,
+    $._erroneous_symbol
   ],
 
   rules: {
@@ -165,7 +169,7 @@ module.exports = grammar({
     number:    $ => $._number_external,
     string:    $ => $._string_external,
     regex:     $ => seq('#"', repeat(/[^"\\]|\\./), '"'),
-    character: $ => token(seq('\\', choice('newline', 'space', 'tab', 'formfeed', 'backspace', 'return', /[a-zA-Z]+/, /./))),
+    character: $ => $._character_external,
     comment:   $ => token(seq(';', /[^\n\r]*/)),
 
     // Recursively handles chained discards: #_ #_ 1 2
