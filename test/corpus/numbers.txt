@@ -88,11 +88,8 @@ Symbols vs Numbers (Disambiguation)
   (number))
 
 ==================
-Illegal Number Suffixes (Should be Symbols)
+Illegal Number Suffixes (Swallowed)
 ==================
 123abc123 1.2.3 1/2/3
 ---
-(source
-  (symbol)
-  (symbol)
-  (symbol))
+(source (invalid_number) (invalid_number) (invalid_number))

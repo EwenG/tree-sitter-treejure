@@ -23,6 +23,10 @@
         {
           "type": "SYMBOL",
           "name": "invalid_character"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "invalid_number"
         }
       ]
     },
@@ -709,6 +713,10 @@
     "invalid_character": {
       "type": "SYMBOL",
       "name": "_erroneous_character"
+    },
+    "invalid_number": {
+      "type": "SYMBOL",
+      "name": "_erroneous_number"
     }
   },
   "extras": [
@@ -801,6 +809,10 @@
     {
       "type": "SYMBOL",
       "name": "_erroneous_symbol"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_erroneous_number"
     }
   ],
   "inline": [],

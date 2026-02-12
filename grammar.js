@@ -32,7 +32,8 @@ module.exports = grammar({
     $._character_external,
     $._erroneous_character,
     $._erroneous_keyword,
-    $._erroneous_symbol
+    $._erroneous_symbol,
+    $._erroneous_number
   ],
 
   rules: {
@@ -41,7 +42,8 @@ module.exports = grammar({
     _form: $ => choice(
       $._visible_form,
       $.discard,
-      $.invalid_character
+      $.invalid_character,
+      $.invalid_number
     ),
 
     // Excludes 'discard' so macros don't stop at #_
@@ -183,5 +185,6 @@ module.exports = grammar({
     )),
 
     invalid_character: $ => $._erroneous_character,
+    invalid_number:    $ => $._erroneous_number,
   }
 });

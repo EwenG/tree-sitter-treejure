@@ -57,7 +57,10 @@ and the next token is a keyword.
   (number)
   (keyword)
   (number)
-  (tagged_literal tag: (symbol) target: (symbol)))
+  (tagged_literal
+    tag: (symbol)
+    target: (number
+              (MISSING _number_external))))
 
 ========================================
 Keyword Boundaries

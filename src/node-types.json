@@ -262,6 +262,10 @@
           "named": true
         },
         {
+          "type": "invalid_number",
+          "named": true
+        },
+        {
           "type": "keyword",
           "named": true
         },
@@ -342,6 +346,11 @@
     "fields": {}
   },
   {
+    "type": "invalid_number",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "keyword",
     "named": true,
     "fields": {}
@@ -376,6 +385,10 @@
         },
         {
           "type": "invalid_character",
+          "named": true
+        },
+        {
+          "type": "invalid_number",
           "named": true
         },
         {
@@ -535,6 +548,10 @@
             "named": true
           },
           {
+            "type": "invalid_number",
+            "named": true
+          },
+          {
             "type": "keyword",
             "named": true
           },
@@ -634,6 +651,10 @@
           },
           {
             "type": "invalid_character",
+            "named": true
+          },
+          {
+            "type": "invalid_number",
             "named": true
           },
           {
@@ -890,6 +911,10 @@
           "named": true
         },
         {
+          "type": "invalid_number",
+          "named": true
+        },
+        {
           "type": "keyword",
           "named": true
         },
@@ -995,6 +1020,10 @@
         },
         {
           "type": "invalid_character",
+          "named": true
+        },
+        {
+          "type": "invalid_number",
           "named": true
         },
         {
@@ -1672,6 +1701,10 @@
         },
         {
           "type": "invalid_character",
+          "named": true
+        },
+        {
+          "type": "invalid_number",
           "named": true
         },
         {

@@ -130,10 +130,4 @@ Syntax Quote skipping discard
     (discard target: (symbol))
     target: (symbol)))
 
-==================
-Macro at EOF (Error)
-==================
-'
----
-(source
-  (ERROR))
+
