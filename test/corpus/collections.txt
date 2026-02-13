@@ -1,0 +1,109 @@
+==================
+Empty Collections
+==================
+() [] #{}
+---
+(source
+  (list_literal)
+  (vector_literal)
+  (set_literal))
+
+==================
+Nested Collections
+==================
+(1 [2 #{3}])
+---
+(source
+  (list_literal
+    (number)
+    (vector_literal
+      (number)
+      (set_literal
+        (number)))))
+
+==================
+Collections with Commas
+==================
+[1, 2, 3]
+---
+(source
+  (vector_literal
+    (number)
+    (number)
+    (number)))
+
+==================
+Metadata on Collections
+==================
+^:private [1 2]
+---
+(source
+  (with_metadata
+    meta: (metadata value: (keyword))
+    target: (vector_literal
+      (number)
+      (number))))
+
+==================
+Discards inside Collections
+==================
+(1 #_ 2 3)
+---
+(source
+  (list_literal
+    (number)
+    (discard
+      target: (number))
+    (number)))
+
+==================
+Reader Macros inside Collections
+==================
+[@my-atom 'foo]
+---
+(source
+  (vector_literal
+    (deref target: (symbol))
+    (quote target: (symbol))))
+
+==================
+Complex Set with Metadata and Discards
+==================
+#{^:meta #_ "ignore" 1}
+---
+(source
+  (set_literal
+    (with_metadata
+      meta: (metadata value: (keyword))
+      (discard target: (string))
+      target: (number))))
+
+==================
+Reader Conditionals in Collections
+==================
+(1 #?(:clj 2 :cljs 3) 4)
+---
+(source
+  (list_literal
+    (number)
+    (reader_conditional
+      marker: (marker)
+      body: (list_literal
+        (keyword) (number)
+        (keyword) (number)))
+    (number)))
+
+==================
+Deeply Nested Discards
+==================
+[1 #_ [2 #_ 3 4] 5]
+---
+(source
+  (vector_literal
+    (number)
+    (discard
+      target: (vector_literal
+        (number)
+        (discard target: (number))
+        (number)))
+    (number)))

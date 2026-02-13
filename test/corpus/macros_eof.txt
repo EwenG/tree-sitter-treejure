@@ -1,0 +1,97 @@
+==================
+Quote at EOF
+==================
+'
+---
+(source (ERROR))
+
+==================
+Syntax Quote at EOF
+==================
+`
+---
+(source (ERROR))
+
+==================
+Deref at EOF
+==================
+@
+---
+(source (ERROR))
+
+==================
+Unquote at EOF
+==================
+~
+---
+(source (ERROR))
+
+==================
+Unquote Splicing at EOF
+==================
+~@
+---
+(source (ERROR))
+
+==================
+Var Quote at EOF
+==================
+#'
+---
+(source (ERROR))
+
+==================
+Metadata Marker at EOF
+==================
+^
+---
+(source (ERROR))
+
+==================
+Metadata Value but no Target at EOF
+==================
+^:meta
+---
+(source (with_metadata
+          (metadata
+            (keyword))))
+
+==================
+Discard at EOF
+==================
+#_
+---
+(source (ERROR))
+
+==================
+Anonymous Function at EOF
+==================
+#(
+---
+(source (ERROR))
+
+==================
+Reader Conditional at EOF
+==================
+#?
+---
+(source (ERROR
+          (marker)))
+
+==================
+Tagged Literal Marker at EOF
+==================
+#
+---
+(source (ERROR))
+
+==================
+Tagged Literal Tag but no Target at EOF
+==================
+#uuid
+---
+(source
+  (tagged_literal
+    (symbol)
+      (number
+        (MISSING _number_external))))

@@ -1,0 +1,155 @@
+==================
+Empty Map
+==================
+{}
+---
+(source (map_literal))
+
+==================
+Basic Map with Keywords
+==================
+{:a 1 :b 2}
+---
+(source
+  (map_literal
+    (pair
+      key: (keyword)
+      value: (number))
+    (pair
+      key: (keyword)
+      value: (number))))
+
+==================
+Mixed Key and Value Types
+==================
+{"string-key" 10.5 foo :bar}
+---
+(source
+  (map_literal
+    (pair
+      key: (string)
+      value: (number))
+    (pair
+      key: (symbol)
+      value: (keyword))))
+
+==================
+Maps with Commas (Whitespace Check)
+==================
+{:a 1, :b 2, :c 3}
+---
+(source
+  (map_literal
+    (pair key: (keyword) value: (number))
+    (pair key: (keyword) value: (number))
+    (pair key: (keyword) value: (number))))
+
+==================
+Nested Maps
+==================
+{:outer {:inner 1}}
+---
+(source
+  (map_literal
+    (pair
+      key: (keyword)
+      value: (map_literal
+        (pair
+          key: (keyword)
+          value: (number))))))
+
+==================
+Metadata inside Maps
+==================
+{^:static :a ^:dynamic :b}
+---
+(source
+  (map_literal
+    (pair
+      key: (with_metadata
+        meta: (metadata value: (keyword))
+        target: (keyword))
+      value: (with_metadata
+        meta: (metadata value: (keyword))
+        target: (keyword)))))
+
+==================
+Discards in Maps (Structural Check)
+==================
+{:a #_ "ignore" 1}
+---
+(source
+  (map_literal
+    (pair
+      key: (keyword)
+      (discard target: (string))
+      value: (number))))
+
+==================
+Multiple Discards and Metadata in Pairs
+==================
+{#_ 1
+;; ee
+:a #_ 1
+;; ee
+#_#_ ^:meta 2 ^:meta 3 ^:meta 4
+;; ee
+#_2}
+---
+(source
+  (map_literal
+    (discard target: (number))
+    (comment)
+    (pair
+      key: (keyword)
+      (discard target: (number))
+      (comment)
+      (discard
+        (discard
+          target: (with_metadata
+                    meta: (metadata
+                    value: (keyword))
+                    target: (number)))
+        target: (with_metadata
+                  meta: (metadata
+                  value: (keyword))
+                  target: (number)))
+      value: (with_metadata
+        meta: (metadata value: (keyword))
+        target: (number)))
+     (comment)
+     (discard target: (number))))
+
+==================
+Namespaced and Auto-resolved Keywords
+==================
+{:ns/key 1 ::auto 2}
+---
+(source
+  (map_literal
+    (pair key: (keyword) value: (number))
+    (pair key: (keyword) value: (number))))
+
+==================
+Map Parity Error (Odd number of forms)
+==================
+{:a 1 :b}
+---
+(source
+  (map_literal
+    (pair key: (keyword) value: (number))
+    (pair
+      key: (keyword)
+      value: (number
+               (MISSING _number_external)))))
+
+==================
+Complex Keys (Vectors as Keys)
+==================
+{[1 2] :val}
+---
+(source
+  (map_literal
+    (pair
+      key: (vector_literal (number) (number))
+      value: (keyword))))
