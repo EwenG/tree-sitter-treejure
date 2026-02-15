@@ -41,7 +41,7 @@ Symbol starting with nil (nil?)
 nil?
 ---
 (source
-  (symbol))
+  (symbol name: (symbol_name)))
 
 ==================
 Symbol containing nil (not-nil)
@@ -49,4 +49,4 @@ Symbol containing nil (not-nil)
 not-nil
 ---
 (source
-  (symbol))
+  (symbol name: (symbol_name)))

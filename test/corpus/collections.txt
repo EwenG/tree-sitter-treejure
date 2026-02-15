@@ -39,7 +39,7 @@ Metadata on Collections
 ---
 (source
   (with_metadata
-    meta: (metadata value: (keyword))
+    meta: (metadata value: (keyword name: (symbol_name)))
     target: (vector_literal
       (number)
       (number))))
@@ -63,8 +63,8 @@ Reader Macros inside Collections
 ---
 (source
   (vector_literal
-    (deref target: (symbol))
-    (quote target: (symbol))))
+    (deref target: (symbol name: (symbol_name)))
+    (quote target: (symbol name: (symbol_name)))))
 
 ==================
 Complex Set with Metadata and Discards
@@ -74,7 +74,7 @@ Complex Set with Metadata and Discards
 (source
   (set_literal
     (with_metadata
-      meta: (metadata value: (keyword))
+      meta: (metadata value: (keyword name: (symbol_name)))
       (discard target: (string))
       target: (number))))
 
@@ -89,8 +89,8 @@ Reader Conditionals in Collections
     (reader_conditional
       marker: (marker)
       body: (list_literal
-        (keyword) (number)
-        (keyword) (number)))
+        (keyword name: (symbol_name)) (number)
+        (keyword name: (symbol_name)) (number)))
     (number)))
 
 ==================

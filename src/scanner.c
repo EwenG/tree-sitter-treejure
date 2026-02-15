@@ -4,7 +4,12 @@
 #include <string.h>
 
 enum TokenType {
-  NUMBER, SYMBOL, KEYWORD,
+  NUMBER,
+  KEYWORD_MARKER,
+  AUTO_RESOLVE_MARKER,
+  IDENTIFIER_NAMESPACE, // 2: ee
+  IDENTIFIER_NAME,      // 3: rr/tt
+  SLASH_SEPARATOR,
   QUOTE_MARKER, SYNTAX_QUOTE_MARKER, DEREF_MARKER, META_MARKER,
   UNQUOTE_MARKER, UNQUOTE_SPLICING_MARKER,
   STRING_EXTERNAL, ERRONEOUS_STRING,
@@ -133,18 +138,6 @@ static int scan_character_type(TSLexer *lexer) {
   return ERRONEOUS_CHARACTER;
 }
 
-static bool scan_identifier(TSLexer *lexer, int char_count, int result_type) {
-  while (!is_token_end(lexer->lookahead)) {
-    lexer->advance(lexer, false);
-    char_count++;
-  }
-  if (char_count > 0) {
-    lexer->result_symbol = result_type;
-    return true;
-  }
-  return false;
-}
-
 static int finish_string_content(TSLexer *lexer, int success_type) {
   bool escaped = false;
   while (lexer->lookahead != 0) {
@@ -164,12 +157,52 @@ static int finish_string_content(TSLexer *lexer, int success_type) {
   return ERRONEOUS_STRING;
 }
 
-static bool scan_exact_word(TSLexer *lexer, const char *word, int len, int res) {
-  for (int i = 0; i < len; i++) {
-    if (lexer->lookahead != word[i]) return false;
+static bool scan_word(TSLexer *lexer, const bool *valid_symbols) {
+  char buffer[256];
+  int i = 0;
+  
+  // 1. Consume the whole word until a boundary or a slash
+  while (lexer->lookahead != 0 && 
+         !is_clojure_whitespace(lexer->lookahead) && 
+         !is_macro_terminating(lexer->lookahead)) {
+    if (lexer->lookahead == '/') break;
+    if (i < 255) buffer[i++] = (char)lexer->lookahead;
     lexer->advance(lexer, false);
   }
-  if (is_token_end(lexer->lookahead)) { lexer->result_symbol = res; return true; }
+  buffer[i] = '\0';
+
+  if (i == 0) return false;
+
+  // 2. Check for Reserved Literals (Priority 1)
+  if (strcmp(buffer, "nil") == 0 && valid_symbols[NIL_LITERAL]) {
+    lexer->result_symbol = NIL_LITERAL; return true;
+  }
+  if (strcmp(buffer, "true") == 0 && valid_symbols[BOOL_TRUE]) {
+    lexer->result_symbol = BOOL_TRUE; return true;
+  }
+  if (strcmp(buffer, "false") == 0 && valid_symbols[BOOL_FALSE]) {
+    lexer->result_symbol = BOOL_FALSE; return true;
+  }
+
+  // 3. Check for Namespace (Priority 2: word followed by /)
+  if (lexer->lookahead == '/' && valid_symbols[IDENTIFIER_NAMESPACE]) {
+    lexer->result_symbol = IDENTIFIER_NAMESPACE;
+    return true;
+  }
+
+  // 4. Check for Name (Priority 3: generic name)
+  if (valid_symbols[IDENTIFIER_NAME]) {
+    // If the parser is looking for a name and we found a slash, 
+    // it means we are in the 'rr/tt' part. Keep consuming through slashes.
+    while (lexer->lookahead != 0 && 
+           !is_clojure_whitespace(lexer->lookahead) && 
+           !is_macro_terminating(lexer->lookahead)) {
+      lexer->advance(lexer, false);
+    }
+    lexer->result_symbol = IDENTIFIER_NAME;
+    return true;
+  }
+
   return false;
 }
 
@@ -183,11 +216,11 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (lexer->lookahead == 0) return false;
   int32_t first = lexer->lookahead;
 
-  if (first == '#') {
+  if (first == '#' && (valid_symbols[REGEX_EXTERNAL])) {
     lexer->advance(lexer, false); // consume #
     
     // Check if it's a regex
-    if (lexer->lookahead == '"' && valid_symbols[REGEX_EXTERNAL]) {
+    if (lexer->lookahead == '"') {
       lexer->advance(lexer, false); // consume "
       lexer->result_symbol = finish_string_content(lexer, REGEX_EXTERNAL);
       return true;
@@ -207,7 +240,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (first == '\\' && (valid_symbols[CHARACTER_EXTERNAL] || valid_symbols[ERRONEOUS_CHARACTER])) {
     lexer->result_symbol = scan_character_type(lexer); return true;
   }
-  if (first == '~') {
+  if (first == '~' && (valid_symbols[UNQUOTE_MARKER] || valid_symbols[UNQUOTE_SPLICING_MARKER])) {
     lexer->advance(lexer, false);
     if (lexer->lookahead == '@' && valid_symbols[UNQUOTE_SPLICING_MARKER]) {
       lexer->advance(lexer, false); lexer->result_symbol = UNQUOTE_SPLICING_MARKER; return true;
@@ -220,26 +253,101 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (first == '@' && valid_symbols[DEREF_MARKER]) { lexer->advance(lexer, false); lexer->result_symbol = DEREF_MARKER; return true; }
   if (first == '^' && valid_symbols[META_MARKER]) { lexer->advance(lexer, false); lexer->result_symbol = META_MARKER; return true; }
 
-  if (first == 'n' && valid_symbols[NIL_LITERAL] && scan_exact_word(lexer, "nil", 3, NIL_LITERAL)) return true;
-  if (first == 't' && valid_symbols[BOOL_TRUE] && scan_exact_word(lexer, "true", 4, BOOL_TRUE)) return true;
-  if (first == 'f' && valid_symbols[BOOL_FALSE] && scan_exact_word(lexer, "false", 5, BOOL_FALSE)) return true;
 
-  if (first == ':' && valid_symbols[KEYWORD]) {
-    lexer->advance(lexer, false); int c = 1;
-    if (lexer->lookahead == ':') { lexer->advance(lexer, false); c++; }
-    return scan_identifier(lexer, c, KEYWORD);
-  }
-  if (first == '+' || first == '-') {
+  if (first == ':' && (valid_symbols[KEYWORD_MARKER] || valid_symbols[AUTO_RESOLVE_MARKER])) {
     lexer->advance(lexer, false);
-    if (isdigit(lexer->lookahead) && valid_symbols[NUMBER] && finish_number(lexer, true)) return true;
-    if (valid_symbols[SYMBOL]) return scan_identifier(lexer, 1, SYMBOL);
+    if (lexer->lookahead == ':' && valid_symbols[AUTO_RESOLVE_MARKER]) {
+      lexer->advance(lexer, false);
+      lexer->result_symbol = AUTO_RESOLVE_MARKER;
+      return true;
+    }
+    if (valid_symbols[KEYWORD_MARKER]) {
+      lexer->result_symbol = KEYWORD_MARKER;
+      return true;
+    }
     return false;
   }
+
+
+  if (first == '/' && valid_symbols[SLASH_SEPARATOR]) {
+    lexer->advance(lexer, false);
+    lexer->result_symbol = SLASH_SEPARATOR;
+    return true;
+  }
+
+  if ((first == '+' || first == '-') && valid_symbols[NUMBER] && (valid_symbols[IDENTIFIER_NAMESPACE] || valid_symbols[IDENTIFIER_NAME])) {
+    lexer->advance(lexer, false);
+
+    // A: Numeric Literal Check (e.g., +1, -12.3, -1/2)
+    if (isdigit(lexer->lookahead)) {
+      if (finish_number(lexer, true)) {
+        lexer->result_symbol = NUMBER;
+        return true;
+      }
+      // If finish_number failed (e.g. 123abc), it will have consumed the word.
+      // In that case, we fall through to treat the whole thing as an identifier.
+    }
+
+    // B: Identifier Logic (+, -, +foo, -ns/bar)
+    // We treat the sign as the start of a "word" and follow the Namespace/Name logic.
+    
+    bool found_slash = false;
+
+    // Check for Namespace first: Peek ahead for a slash
+    if (valid_symbols[IDENTIFIER_NAMESPACE]) {
+      lexer->mark_end(lexer); // Current position is after the sign
+      
+      // Lookahead loop to find '/'
+      while (lexer->lookahead != 0 && 
+             !is_clojure_whitespace(lexer->lookahead) && 
+             !is_macro_terminating(lexer->lookahead)) {
+        if (lexer->lookahead == '/') {
+          found_slash = true;
+          break;
+        }
+        lexer->advance(lexer, false);
+      }
+
+      if (found_slash) {
+        lexer->result_symbol = IDENTIFIER_NAMESPACE;
+        lexer->mark_end(lexer); // Commit text up to (but not including) the slash
+        return true;
+      }
+      // If no slash found, Tree-sitter will automatically retry the scan call,
+      // and we will hit the IDENTIFIER_NAME block below.
+    }
+
+    // Check for Name: Greedy consumption until whitespace or terminator
+    if (valid_symbols[IDENTIFIER_NAME]) {
+      lexer->result_symbol = IDENTIFIER_NAME;
+      lexer->mark_end(lexer);
+      return true;
+    }
+
+    return false;
+  }
+
+  if((first == 'n' && valid_symbols[NIL_LITERAL]) || (first == 't' && valid_symbols[BOOL_TRUE]) || (first == 'f' && valid_symbols[BOOL_FALSE])) {
+    return scan_word(lexer, valid_symbols);
+  }
+
+  if (valid_symbols[IDENTIFIER_NAME] && valid_symbols[IDENTIFIER_NAMESPACE]) {
+    if (!is_macro_terminating(first) && !isdigit(first)) {
+      return scan_word(lexer, valid_symbols);
+    }
+  }
+
+  if (valid_symbols[IDENTIFIER_NAME] && !valid_symbols[IDENTIFIER_NAMESPACE]) {
+    return scan_word(lexer, valid_symbols);
+  }
+
+  if (valid_symbols[IDENTIFIER_NAMESPACE] && !valid_symbols[IDENTIFIER_NAME]) {
+    return scan_word(lexer, valid_symbols);
+  }
+  
   if (isdigit(first) && (valid_symbols[NUMBER] || valid_symbols[ERRONEOUS_NUMBER])) {
     return finish_number(lexer, false);
   }
-  if (valid_symbols[SYMBOL] && !is_macro(first) && !isdigit(first)) {
-    return scan_identifier(lexer, 0, SYMBOL);
-  }
+  
   return false;
 }

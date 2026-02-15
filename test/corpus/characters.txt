@@ -124,11 +124,11 @@ Characters in Map
 (source
   (map_literal
     (pair
-      (keyword)
-      (character))
+      key: (keyword name: (symbol_name))
+      value: (character))
     (pair
-      (keyword)
-      (character))))
+      key: (keyword name: (symbol_name))
+      value: (character))))
 
 ==================
 Characters in Set
@@ -148,9 +148,9 @@ Character with Metadata
 ---
 (source
   (with_metadata
-    (metadata
-      (keyword))
-    (character)))
+    meta: (metadata
+            value: (keyword name: (symbol_name)))
+            target: (character)))
 
 ==================
 Quoted Character

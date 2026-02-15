@@ -42,10 +42,12 @@ Booleans in Map
 (source
   (map_literal
     (pair
-      (keyword)
+      (keyword
+        (symbol_name))
       (boolean))
     (pair
-      (keyword)
+      (keyword
+        (symbol_name))
       (boolean))))
 
 ==================
@@ -66,7 +68,8 @@ Booleans with Metadata
 (source
   (with_metadata
     (metadata
-      (keyword))
+      (keyword
+        (symbol_name)))
     (boolean)))
 
 ==================

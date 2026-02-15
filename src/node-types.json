@@ -353,7 +353,42 @@
   {
     "type": "keyword",
     "named": true,
-    "fields": {}
+    "fields": {
+      "marker": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": ":",
+            "named": false
+          },
+          {
+            "type": "::",
+            "named": false
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "symbol_name",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "symbol_name",
+            "named": true
+          }
+        ]
+      }
+    }
   },
   {
     "type": "list_literal",
@@ -1099,7 +1134,28 @@
   {
     "type": "symbol",
     "named": true,
-    "fields": {}
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "symbol_name",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "symbol_name",
+            "named": true
+          }
+        ]
+      }
+    }
   },
   {
     "type": "syntax_quote",
@@ -1921,6 +1977,14 @@
     "named": false
   },
   {
+    "type": ":",
+    "named": false
+  },
+  {
+    "type": "::",
+    "named": false
+  },
+  {
     "type": "[",
     "named": false
   },
@@ -1939,6 +2003,10 @@
   },
   {
     "type": "marker_splicing",
+    "named": true
+  },
+  {
+    "type": "symbol_name",
     "named": true
   },
   {

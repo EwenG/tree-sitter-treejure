@@ -14,9 +14,9 @@ Boolean/Nil vs Symbols
 true? false-value nilly
 ---
 (source
-  (symbol)
-  (symbol)
-  (symbol))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name)))
 
 ==================
 Booleans in Collections

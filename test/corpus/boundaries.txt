@@ -5,22 +5,24 @@ Symbols can contain ':' inside because it is not in macroTerminatingMask
 foo:bar :colon:inside:
 ---
 (source
-  (symbol)
-  (keyword))
+  (symbol
+    (symbol_name))
+  (keyword
+    (symbol_name)))
 
 ========================================
 Single Quote inside Symbol
 ========================================
 foo'bar
 ---
-(source (symbol))
+(source (symbol (symbol_name)))
 
 ========================================
 Single Quote as Macro (Prefix)
 ========================================
 'foo
 ---
-(source (quote target: (symbol)))
+(source (quote target: (symbol name: (symbol_name))))
 
 ========================================
 Backslash as Terminating Macro
@@ -28,7 +30,7 @@ Backslash as Terminating Macro
 foo\b
 ---
 (source
-  (symbol)
+  (symbol (symbol_name))
   (character))
 
 ========================================
@@ -39,10 +41,10 @@ foo(bar)
 foo@bar
 ---
 (source
-  (symbol)
-  (list_literal (symbol))
-  (symbol)
-  (deref target: (symbol)))
+  (symbol name: (symbol_name))
+  (list_literal (symbol name: (symbol_name)))
+  (symbol name: (symbol_name))
+  (deref target: (symbol name: (symbol_name))))
 
 ========================================
 Number Boundaries (Strict Macro Mask)
@@ -55,10 +57,10 @@ and the next token is a keyword.
 ---
 (source
   (number)
-  (keyword)
+  (keyword name: (symbol_name))
   (number)
   (tagged_literal
-    tag: (symbol)
+    tag: (symbol name: (symbol_name))
     target: (number
               (MISSING _number_external))))
 
@@ -68,7 +70,9 @@ Keywords, like symbols, can contain ':'
 ========================================
 :foo:bar/baz:qux
 ---
-(source (keyword))
+(source (keyword
+          (symbol_name)
+          (symbol_name)))
 
 ========================================
 Character Word Boundaries
@@ -81,9 +85,9 @@ Character names stop at terminating macros
 ---
 (source
   (character)
-  (list_literal (symbol))
+  (list_literal (symbol name: (symbol_name)))
   (character)
-  (deref target: (symbol))
+  (deref target: (symbol name: (symbol_name)))
   (invalid_character)
   (invalid_character))
 
@@ -95,7 +99,7 @@ Ensure #uuid"..." works (Number/Symbol would stop at ")
 ---
 (source
   (tagged_literal
-    tag: (symbol)
+    tag: (symbol name: (symbol_name))
     target: (string)))
 
 ========================================
@@ -105,6 +109,6 @@ We removed % from is_macro so these must be symbols
 % %1 %&
 ---
 (source
-  (symbol)
-  (symbol)
-  (symbol))
+  (symbol (symbol_name))
+  (symbol (symbol_name))
+  (symbol (symbol_name)))

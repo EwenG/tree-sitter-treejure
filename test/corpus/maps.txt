@@ -13,10 +13,10 @@ Basic Map with Keywords
 (source
   (map_literal
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       value: (number))
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       value: (number))))
 
 ==================
@@ -30,8 +30,8 @@ Mixed Key and Value Types
       key: (string)
       value: (number))
     (pair
-      key: (symbol)
-      value: (keyword))))
+      key: (symbol name: (symbol_name))
+      value: (keyword name: (symbol_name)))))
 
 ==================
 Maps with Commas (Whitespace Check)
@@ -40,9 +40,9 @@ Maps with Commas (Whitespace Check)
 ---
 (source
   (map_literal
-    (pair key: (keyword) value: (number))
-    (pair key: (keyword) value: (number))
-    (pair key: (keyword) value: (number))))
+    (pair key: (keyword name: (symbol_name)) value: (number))
+    (pair key: (keyword name: (symbol_name)) value: (number))
+    (pair key: (keyword name: (symbol_name)) value: (number))))
 
 ==================
 Nested Maps
@@ -52,10 +52,10 @@ Nested Maps
 (source
   (map_literal
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       value: (map_literal
         (pair
-          key: (keyword)
+          key: (keyword name: (symbol_name))
           value: (number))))))
 
 ==================
@@ -67,11 +67,11 @@ Metadata inside Maps
   (map_literal
     (pair
       key: (with_metadata
-        meta: (metadata value: (keyword))
-        target: (keyword))
+        meta: (metadata value: (keyword name: (symbol_name)))
+        target: (keyword name: (symbol_name)))
       value: (with_metadata
-        meta: (metadata value: (keyword))
-        target: (keyword)))))
+        meta: (metadata value: (keyword name: (symbol_name)))
+        target: (keyword name: (symbol_name))))))
 
 ==================
 Discards in Maps (Structural Check)
@@ -81,7 +81,7 @@ Discards in Maps (Structural Check)
 (source
   (map_literal
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       (discard target: (string))
       value: (number))))
 
@@ -101,21 +101,21 @@ Multiple Discards and Metadata in Pairs
     (discard target: (number))
     (comment)
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       (discard target: (number))
       (comment)
       (discard
         (discard
           target: (with_metadata
                     meta: (metadata
-                    value: (keyword))
+                    value: (keyword name: (symbol_name)))
                     target: (number)))
         target: (with_metadata
                   meta: (metadata
-                  value: (keyword))
+                  value: (keyword name: (symbol_name)))
                   target: (number)))
       value: (with_metadata
-        meta: (metadata value: (keyword))
+        meta: (metadata value: (keyword name: (symbol_name)))
         target: (number)))
      (comment)
      (discard target: (number))))
@@ -127,8 +127,12 @@ Namespaced and Auto-resolved Keywords
 ---
 (source
   (map_literal
-    (pair key: (keyword) value: (number))
-    (pair key: (keyword) value: (number))))
+    (pair key: (keyword
+                 namespace: (symbol_name)
+                 name: (symbol_name))
+          value: (number))
+    (pair key: (keyword name: (symbol_name))
+          value: (number))))
 
 ==================
 Map Parity Error (Odd number of forms)
@@ -137,9 +141,9 @@ Map Parity Error (Odd number of forms)
 ---
 (source
   (map_literal
-    (pair key: (keyword) value: (number))
+    (pair key: (keyword name: (symbol_name)) value: (number))
     (pair
-      key: (keyword)
+      key: (keyword name: (symbol_name))
       value: (number
                (MISSING _number_external)))))
 
@@ -152,4 +156,4 @@ Complex Keys (Vectors as Keys)
   (map_literal
     (pair
       key: (vector_literal (number) (number))
-      value: (keyword))))
+      value: (keyword name: (symbol_name)))))

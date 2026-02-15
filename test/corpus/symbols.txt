@@ -1,44 +1,76 @@
 ==================
 Basic Symbols
 ==================
-foo foo-bar baz_quux + !? . ..
+foo foo-bar baz_quux !? . ..
 ---
-(source (symbol) (symbol) (symbol) (symbol) (symbol) (symbol) (symbol))
+(source
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name)))
 
 ==================
 Namespaced Symbols
 ==================
-clojure.string/join ns/member
+clojure.string/join ns/member e/#
 ---
-(source (symbol) (symbol))
+(source
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name))
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name))
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name)))
 
 ==================
 The Division Symbol
 ==================
 /
 ---
-(source (symbol))
+(source
+  (symbol
+    name: (symbol_name)))
 
 ==================
-The Plus Symbol
+The Plus and Minus Symbols
 ==================
-+ +foo/bar
++ - +foo/bar -ns/member +#
 ---
-(source (symbol) (symbol))
+(source
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name))
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name))
+  (symbol name: (symbol_name)))
 
 ==================
-Keywords
-==================
-:foo :bar/baz ::auto-resolved
----
-(source (keyword) (keyword) (keyword))
-
-==================
-3 slashes, not an error
+Multi-slash Symbols (Permissive)
+Note: In this version, namespace is "foo" and name is "bar/baz"
 ==================
 foo/bar/baz
 ---
-(source (symbol))
+(source
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name)))
+
+==================
+Single Quote inside Symbol
+==================
+foo'bar can't-find-it
+---
+(source
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name)))
 
 ==================
 No Collision with Reader Macros
@@ -47,11 +79,12 @@ No Collision with Reader Macros
 ---
 (source
   (quote
-    target: (symbol))
+    target: (symbol name: (symbol_name)))
   (with_metadata
-    meta: (metadata value: (symbol))
+    meta: (metadata
+      value: (symbol name: (symbol_name)))
     target: (deref
-      target: (symbol))))
+      target: (symbol name: (symbol_name)))))
 
 ==================
 Metadata Missing Target (EOF)
@@ -60,5 +93,17 @@ Metadata Missing Target (EOF)
 ---
 (source
   (with_metadata
-    meta: (metadata value: (keyword))))
+    meta: (metadata
+      value: (keyword name: (symbol_name)))))
+
+==================
+Complex symbols
+==================
+e/:
+---
+(source
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name)))
+
 

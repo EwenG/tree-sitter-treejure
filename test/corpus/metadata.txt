@@ -5,10 +5,10 @@ Recursive Metadata
 ---
 (source
   (with_metadata
-    meta: (metadata value: (keyword))
+    meta: (metadata value: (keyword name: (symbol_name)))
     target: (with_metadata
-      meta: (metadata value: (keyword))
+      meta: (metadata value: (keyword name: (symbol_name)))
       target: (list_literal
-        (symbol)
-        (symbol)
+        (symbol name: (symbol_name))
+        (symbol name: (symbol_name))
         (number)))))

@@ -16,8 +16,11 @@ module.exports = grammar({
 
   externals: $ => [
     $._number_external,
-    $._symbol_external,
-    $._keyword_external,
+    $._keyword_marker,
+    $._auto_resolve_marker,
+    $._identifier_namespace,        // 2: The "ee" in :ee/rr/tt
+    $._identifier_name,             // 3: The "rr/tt" or "foo"
+    $._slash_separator,             // 4: The "/"
     $._quote_marker,          // '
     $._syntax_quote_marker,   // `
     $._deref_marker,          // @
@@ -102,8 +105,31 @@ module.exports = grammar({
     ),
 
     _identifier: $ => choice($.symbol, $.keyword),
-    symbol:  $ => $._symbol_external,
-    keyword: $ => $._keyword_external,
+
+    symbol: $ => choice(
+      field('name', alias($._slash_separator, $.symbol_name)),
+      prec(2, seq(
+        field('namespace', alias($._identifier_namespace, $.symbol_name)),
+        $._slash_separator,
+        field('name', alias($._identifier_name, $.symbol_name))
+      )),
+      prec(1, field('name', alias($._identifier_name, $.symbol_name)))
+    ),
+
+    keyword: $ => seq(
+      field('marker', choice(
+        alias($._keyword_marker, ':'),
+        alias($._auto_resolve_marker, '::')
+      )),
+      choice(
+        prec(2, seq(
+          field('namespace', alias($._identifier_namespace, $.symbol_name)),
+          $._slash_separator,
+          field('name', alias($._identifier_name, $.symbol_name))
+        )),
+        prec(1, field('name', alias($._identifier_name, $.symbol_name)))
+      )
+    ),
 
     // --- READER MACROS ---
     _reader_macro: $ => choice(

@@ -81,9 +81,9 @@ Symbols vs Numbers (Disambiguation)
 + - / +1 -1
 ---
 (source
-  (symbol)
-  (symbol)
-  (symbol)
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
   (number)
   (number))
 

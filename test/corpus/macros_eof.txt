@@ -53,8 +53,8 @@ Metadata Value but no Target at EOF
 ^:meta
 ---
 (source (with_metadata
-          (metadata
-            (keyword))))
+          meta: (metadata
+          value: (keyword name: (symbol_name)))))
 
 ==================
 Discard at EOF
@@ -92,6 +92,6 @@ Tagged Literal Tag but no Target at EOF
 ---
 (source
   (tagged_literal
-    (symbol)
-      (number
-        (MISSING _number_external))))
+    tag: (symbol name: (symbol_name))
+    target: (number
+              (MISSING _number_external))))

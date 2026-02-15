@@ -15,8 +15,7 @@ Recursive Quote
 ---
 (source
   (quote
-    target: (quote
-      target: (symbol))))
+    target: (quote target: (symbol name: (symbol_name)))))
 
 ==================
 Macro Skipping Multiple Discards
@@ -27,7 +26,7 @@ Macro Skipping Multiple Discards
   (deref
     (discard target: (number))
     (discard target: (number))
-    target: (symbol)))
+    target: (symbol name: (symbol_name))))
 
 ==================
 Metadata wrapping a Quote
@@ -36,9 +35,9 @@ Metadata wrapping a Quote
 ---
 (source
   (with_metadata
-    meta: (metadata value: (keyword))
+    meta: (metadata value: (keyword name: (symbol_name)))
     target: (quote
-      target: (symbol))))
+      target: (symbol name: (symbol_name)))))
 
 ==================
 Var Quote with Metadata on Target
@@ -48,8 +47,8 @@ Var Quote with Metadata on Target
 (source
   (var_quote
     target: (with_metadata
-      meta: (metadata value: (keyword))
-      target: (symbol))))
+      meta: (metadata value: (keyword name: (symbol_name)))
+      target: (symbol name: (symbol_name)))))
 
 ==================
 Complex Nested Macros (Unquote in Quote)
@@ -60,7 +59,7 @@ Complex Nested Macros (Unquote in Quote)
   (syntax_quote
     target: (vector_literal
       (unquote_splicing
-        target: (symbol)))))
+        target: (symbol name: (symbol_name))))))
 
 ==================
 Anonymous Function with Discards
@@ -70,9 +69,9 @@ Anonymous Function with Discards
 (source
   (fn_literal
     (discard target: (string))
-    (symbol)
-    (symbol)
-    (symbol)))
+    (symbol name: (symbol_name))
+    (symbol name: (symbol_name))
+    (symbol name: (symbol_name))))
 
 ==================
 Tagged Literal with Whitespace and Discard
@@ -81,7 +80,7 @@ Tagged Literal with Whitespace and Discard
 ---
 (source
   (tagged_literal
-    tag: (symbol)
+    tag: (symbol name: (symbol_name))
     (discard target: (string))
     target: (string)))
 
@@ -94,8 +93,8 @@ Reader Conditional with Splicing
   (reader_conditional
     marker: (marker_splicing)
     body: (list_literal
-      (keyword) (vector_literal (number) (number))
-      (keyword) (vector_literal (number) (number)))))
+      (keyword name: (symbol_name)) (vector_literal (number) (number))
+      (keyword name: (symbol_name)) (vector_literal (number) (number)))))
 
 ==================
 Deref of a Metadata wrapped Symbol
@@ -105,8 +104,8 @@ Deref of a Metadata wrapped Symbol
 (source
   (deref
     target: (with_metadata
-      meta: (metadata value: (keyword))
-      target: (symbol))))
+      meta: (metadata value: (keyword name: (symbol_name)))
+      target: (symbol name: (symbol_name)))))
 
 ==================
 Syntax Quote (Backtick)
@@ -118,7 +117,7 @@ Syntax Quote (Backtick)
     target: (vector_literal
       (number)
       (unquote
-        target: (symbol)))))
+        target: (symbol name: (symbol_name))))))
 
 ==================
 Syntax Quote skipping discard
@@ -127,7 +126,7 @@ Syntax Quote skipping discard
 ---
 (source
   (syntax_quote
-    (discard target: (symbol))
-    target: (symbol)))
+    (discard target: (symbol name: (symbol_name)))
+    target: (symbol name: (symbol_name))))
 
 
