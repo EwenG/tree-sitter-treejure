@@ -23,9 +23,10 @@ BigInt and BigDecimal
 ==================
 Hexadecimal and Octal
 ==================
-0xff 0X1A 0777
+0xff 0X1A 0777 08/5
 ---
 (source
+  (number)
   (number)
   (number)
   (number))
@@ -33,9 +34,10 @@ Hexadecimal and Octal
 ==================
 Floating Point
 ==================
-3.14 -0.5 1e10 1.2e-5 -5.5E+2
+3.14 -0.5 1e10 1.2e-5 -5.5E+2 0.
 ---
 (source
+  (number)
   (number)
   (number)
   (number)
@@ -64,32 +66,82 @@ Radix Notation
   (number))
 
 ==================
-Numbers in Collections (Boundary Check)
+Boundary: Reader Macros (#)
 ==================
-(1 [2/3] {4.0 5})
+456#bar
 ---
 (source
-  (list_literal
-    (number)
-    (vector_literal (number))
-    (map_literal
-      (pair key: (number) value: (number)))))
+  (number)
+  (tagged_literal
+    tag: (symbol name: (symbol_name))
+    target: (number
+              (MISSING _number_external))))
 
 ==================
-Symbols vs Numbers (Disambiguation)
+Symbols vs Numbers
 ==================
-+ - / +1 -1
++ - / +1 -1 .5
 ---
 (source
   (symbol name: (symbol_name))
   (symbol name: (symbol_name))
   (symbol name: (symbol_name))
   (number)
-  (number))
+  (number)
+  (symbol name: (symbol_name)))
 
 ==================
-Illegal Number Suffixes (Swallowed)
+Invalid Numbers (Illegal Characters/Suffixes)
 ==================
-123abc123 1.2.3 1/2/3
+123abc123 1.2.3 1/2/3 123:foo 08
 ---
-(source (invalid_number) (invalid_number) (invalid_number))
+(source 
+  (invalid_number) 
+  (invalid_number) 
+  (invalid_number) 
+  (invalid_number) 
+  (invalid_number))
+
+==================
+Invalid Radix/BigInt Combinations
+==================
+2r1010N/3 123N.5
+---
+(source 
+  (invalid_number) 
+  (invalid_number))
+
+==================
+Number Boundary: Terminating Macros (Valid)
+==================
+123(foo) 123[foo] 123{foo bar} 123"foo" 123;comment
+123\a 123@ref 123~unquote 123`syntax 123'quote
+---
+(source
+  (number) (list_literal (symbol name: (symbol_name)))
+  (number) (vector_literal (symbol name: (symbol_name)))
+  (number) (map_literal (pair key: (symbol name: (symbol_name)) value: (symbol name: (symbol_name))))
+  (number) (string)
+  (number) (comment)
+  (number) (character)
+  (number) (deref target: (symbol name: (symbol_name)))
+  (number) (unquote target: (symbol name: (symbol_name)))
+  (number) (syntax_quote target: (symbol name: (symbol_name)))
+  (number) (quote target: (symbol name: (symbol_name))))
+
+==================
+Number Boundary: Non-Terminating Macros (Invalid)
+==================
+123:keyword
+---
+(source (invalid_number))
+
+==================
+Number Boundary: Closing Macros (Valid)
+==================
+[123] (456) {1 789}
+---
+(source
+  (vector_literal (number))
+  (list_literal (number))
+  (map_literal (pair key: (number) value: (number))))

@@ -5,13 +5,6 @@
 #include <ctype.h>
 #include <string.h>
 
-/**
- * Boundary for Symbols, Keywords, and Character names.
- */
-static bool is_token_end(int32_t c) {
-    return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
-}
-
 static int scan_character_type(TSLexer *lexer) {
   lexer->advance(lexer, false); // Consume "\" 
   if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
@@ -20,14 +13,17 @@ static int scan_character_type(TSLexer *lexer) {
   buffer[i++] = (char)lexer->lookahead; 
   lexer->advance(lexer, false);
 
-  if (is_token_end(lexer->lookahead)) return CHARACTER_EXTERNAL;
+  // If the char after the first char is a token boundary, it's a single char literal (\a)
+  if (is_token_boundary(lexer->lookahead)) return CHARACTER_EXTERNAL;
 
-  while (!is_token_end(lexer->lookahead) && i < 31) {
+  // Otherwise, consume until a SOFT boundary (allowing ' or @ to be part of the erroneous name)
+  while (!is_token_boundary(lexer->lookahead) && i < 31) {
     buffer[i++] = (char)lexer->lookahead;
     lexer->advance(lexer, false);
   }
   buffer[i] = '\0';
 
+  // Validation
   if (strcmp(buffer, "newline") == 0 || strcmp(buffer, "space") == 0 ||
       strcmp(buffer, "tab") == 0 || strcmp(buffer, "formfeed") == 0 ||
       strcmp(buffer, "backspace") == 0 || strcmp(buffer, "return") == 0) return CHARACTER_EXTERNAL;
@@ -40,6 +36,7 @@ static int scan_character_type(TSLexer *lexer) {
     for (int j = 1; j < i; j++) if (buffer[j] < '0' || buffer[j] > '7') return ERRONEOUS_CHARACTER;
     return CHARACTER_EXTERNAL;
   }
+
   return ERRONEOUS_CHARACTER;
 }
 
@@ -63,22 +60,19 @@ static int finish_string_content(TSLexer *lexer, int success_type) {
 }
 
 static bool scan_word(TSLexer *lexer, const bool *valid_symbols) {
+
   char buffer[256];
   int i = 0;
   
-  // 1. Consume the whole word until a boundary or a slash
-  while (lexer->lookahead != 0 && 
-         !is_clojure_whitespace(lexer->lookahead) && 
-         !is_macro_terminating(lexer->lookahead)) {
-    if (lexer->lookahead == '/') break;
+  // 1. Consume until boundary or first slash
+  while (!is_token_boundary(lexer->lookahead) && lexer->lookahead != '/') {
     if (i < 255) buffer[i++] = (char)lexer->lookahead;
     lexer->advance(lexer, false);
   }
   buffer[i] = '\0';
+  if (i == 0 && lexer->lookahead != '/') return false;
 
-  if (i == 0) return false;
-
-  // 2. Check for Reserved Literals (Priority 1)
+  // Check reserved literals
   if (strcmp(buffer, "nil") == 0 && valid_symbols[NIL_LITERAL]) {
     lexer->result_symbol = NIL_LITERAL; return true;
   }
@@ -89,19 +83,16 @@ static bool scan_word(TSLexer *lexer, const bool *valid_symbols) {
     lexer->result_symbol = BOOL_FALSE; return true;
   }
 
-  // 3. Check for Namespace (Priority 2: word followed by /)
   if (lexer->lookahead == '/' && valid_symbols[IDENTIFIER_NAMESPACE]) {
     lexer->result_symbol = IDENTIFIER_NAMESPACE;
     return true;
   }
 
-  // 4. Check for Name (Priority 3: generic name)
+  // 4. Priority 3: Name
+  // If we are looking for a name, consume EVERYTHING until a hard boundary.
+  // This allows "rr/tt" in :ee/rr/tt and "bar/baz" in foo/bar/baz.
   if (valid_symbols[IDENTIFIER_NAME]) {
-    // If the parser is looking for a name and we found a slash, 
-    // it means we are in the 'rr/tt' part. Keep consuming through slashes.
-    while (lexer->lookahead != 0 && 
-           !is_clojure_whitespace(lexer->lookahead) && 
-           !is_macro_terminating(lexer->lookahead)) {
+    while (!is_token_boundary(lexer->lookahead)) {
       lexer->advance(lexer, false);
     }
     lexer->result_symbol = IDENTIFIER_NAME;
@@ -185,12 +176,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
 
     // A: Numeric Literal Check (e.g., +1, -12.3, -1/2)
     if (isdigit(lexer->lookahead)) {
-      if (finish_number(lexer, true)) {
-        lexer->result_symbol = NUMBER;
-        return true;
-      }
-      // If finish_number failed (e.g. 123abc), it will have consumed the word.
-      // In that case, we fall through to treat the whole thing as an identifier.
+      return scan_number_word(lexer, first);
     }
 
     // B: Identifier Logic (+, -, +foo, -ns/bar)
@@ -251,7 +237,8 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   }
   
   if (isdigit(first) && (valid_symbols[NUMBER] || valid_symbols[ERRONEOUS_NUMBER])) {
-    return finish_number(lexer, false);
+    lexer->advance(lexer, false);
+    return scan_number_word(lexer, first);
   }
   
   return false;

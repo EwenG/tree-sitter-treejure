@@ -56,8 +56,7 @@ and the next token is a keyword.
 456#bar
 ---
 (source
-  (number)
-  (keyword name: (symbol_name))
+  (invalid_number)
   (number)
   (tagged_literal
     tag: (symbol name: (symbol_name))
