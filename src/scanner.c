@@ -1,110 +1,15 @@
 #include "tree_sitter/parser.h"
+#include "scanner_shared.h"
+#include "numbers.c"
 #include <wctype.h>
 #include <ctype.h>
 #include <string.h>
-
-enum TokenType {
-  NUMBER,
-  KEYWORD_MARKER,
-  AUTO_RESOLVE_MARKER,
-  IDENTIFIER_NAMESPACE, // 2: ee
-  IDENTIFIER_NAME,      // 3: rr/tt
-  SLASH_SEPARATOR,
-  QUOTE_MARKER, SYNTAX_QUOTE_MARKER, DEREF_MARKER, META_MARKER,
-  UNQUOTE_MARKER, UNQUOTE_SPLICING_MARKER,
-  STRING_EXTERNAL, ERRONEOUS_STRING,
-  NIL_LITERAL, BOOL_TRUE, BOOL_FALSE,
-  CHARACTER_EXTERNAL, ERRONEOUS_CHARACTER,
-  ERRONEOUS_KEYWORD, ERRONEOUS_SYMBOL,
-  ERRONEOUS_NUMBER,
-  REGEX_EXTERNAL
-};
-
-static bool is_clojure_whitespace(int32_t c) {
-  return c == ' '  || c == '\t' || c == '\r' || c == '\n' || 
-         c == ','  || c == '\f' || c == '\v' ||
-         c == 0xA0 || c == 0xAD || (c >= 0x2000 && c <= 0x200A) || 
-         c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || 
-         c == 0x3000 || c == 0x1680 || c == 0x180E;
-}
-
-/**
- * Mirroring LispReader.isMacro(ch)
- */
-static bool is_macro(int32_t c) {
-    return c == '"' || c == ':' || c == ';' || c == '\'' || c == '@' || 
-           c == '^' || c == '`' || c == '~' || c == '(' || c == ')' || 
-           c == '[' || c == ']' || c == '{' || c == '}' || c == '\\' || 
-           c == '#';
-}
-
-/**
- * Mirroring LispReader.isTerminatingMacro(ch)
- * Excludes '#', '\'', and ':'
- */
-static bool is_macro_terminating(int32_t c) {
-    if (!is_macro(c)) return false;
-    return (c != '#' && c != '\'' && c != ':');
-}
-
-/**
- * Boundary for Numbers. Numbers stop at ANY macro.
- */
-static bool is_number_end(int32_t c) {
-    return c == 0 || is_clojure_whitespace(c) || is_macro(c);
-}
 
 /**
  * Boundary for Symbols, Keywords, and Character names.
  */
 static bool is_token_end(int32_t c) {
     return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
-}
-
-static bool finish_number(TSLexer *lexer, bool has_digits) {
-  bool is_hex = false, is_radix = false, is_float = false, is_ratio = false;
-
-  if (!has_digits && lexer->lookahead == '0') {
-    has_digits = true; lexer->advance(lexer, false);
-    if (lexer->lookahead == 'x' || lexer->lookahead == 'X') { is_hex = true; lexer->advance(lexer, false); }
-  }
-
-  while (!is_number_end(lexer->lookahead)) {
-    int32_t c = lexer->lookahead;
-
-    if (isdigit(c)) { has_digits = true; }
-    else if (is_hex && isxdigit(c)) { has_digits = true; }
-    else if (c == '.' && !is_hex && !is_ratio && !is_float) is_float = true;
-    else if (c == '/' && !is_hex && !is_float && !is_ratio) is_ratio = true;
-    else if ((c == 'e' || c == 'E') && !is_hex && !is_ratio) {
-      is_float = true; lexer->advance(lexer, false);
-      if (lexer->lookahead == '+' || lexer->lookahead == '-') lexer->advance(lexer, false);
-      continue;
-    }
-    else if ((c == 'r' || c == 'R') && has_digits && !is_radix && !is_float && !is_ratio && !is_hex) is_radix = true;
-    else if (is_radix && iswalnum(c)) has_digits = true;
-    else if ((c == 'N' || c == 'M') && has_digits) {
-      lexer->advance(lexer, false);
-      if (is_number_end(lexer->lookahead)) {
-        lexer->result_symbol = NUMBER;
-        return true;
-      }
-      goto number_error;
-    } 
-    else { goto number_error; }
-    lexer->advance(lexer, false);
-  }
-
-  if (has_digits) {
-    lexer->result_symbol = NUMBER;
-    return true;
-  }
-  return false;
-
-number_error:
-  while (!is_number_end(lexer->lookahead)) lexer->advance(lexer, false);
-  lexer->result_symbol = ERRONEOUS_NUMBER;
-  return true;
 }
 
 static int scan_character_type(TSLexer *lexer) {
