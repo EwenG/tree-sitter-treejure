@@ -39,7 +39,7 @@ The Division Symbol
 ==================
 The Plus and Minus Symbols
 ==================
-+ - +foo/bar -ns/member +#
++ - +foo/bar -ns/member +# +ns/foo/bar
 ---
 (source
   (symbol name: (symbol_name))
@@ -50,7 +50,10 @@ The Plus and Minus Symbols
   (symbol
     namespace: (symbol_name)
     name: (symbol_name))
-  (symbol name: (symbol_name)))
+  (symbol name: (symbol_name))
+  (symbol
+    namespace: (symbol_name)
+    name: (symbol_name)))
 
 ==================
 Multi-slash Symbols (Permissive)
@@ -105,5 +108,4 @@ e/:
   (symbol
     namespace: (symbol_name)
     name: (symbol_name)))
-
 

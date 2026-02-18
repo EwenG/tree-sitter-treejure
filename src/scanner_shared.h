@@ -32,16 +32,6 @@ static bool is_clojure_whitespace(int32_t c) {
 }
 
 /**
- * Mirroring LispReader.isMacro(ch)
- */
-static bool is_macro(int32_t c) {
-    return c == '"' || c == ':' || c == ';' || c == '\'' || c == '@' || 
-           c == '^' || c == '`' || c == '~' || c == '(' || c == ')' || 
-           c == '[' || c == ']' || c == '{' || c == '}' || c == '\\' || 
-           c == '#';
-}
-
-/**
  * Terminating Macros: Characters that split any word (Symbol, Number, Character).
  * Added @, ^, `, ~, and \ to the standard set.
  * Excluded ' and # because they can be part of symbols.
@@ -53,26 +43,9 @@ static bool is_macro_terminating(int32_t c) {
 }
 
 /**
- * Reader macros that trigger a split in symbols/numbers/characters
- * IF they are encountered after the first character.
- */
-static bool is_reader_macro(int32_t c) {
-    return c == '\'' || c == '@' || c == '^' || c == '`' || 
-           c == '~'  || c == '\\' || c == '#';
-}
-
-/**
  * General boundary for most tokens.
  */
 static bool is_token_boundary(int32_t c) {
-    return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
-}
-
-/**
- * For Errors and Character Names: only stop at whitespace or hard macros.
- * This ensures \newline'bar is swallowed as one (invalid) character.
- */
-static bool is_soft_boundary(int32_t c) {
     return c == 0 || is_clojure_whitespace(c) || is_macro_terminating(c);
 }
 

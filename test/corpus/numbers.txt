@@ -57,9 +57,10 @@ Ratios
 ==================
 Radix Notation
 ==================
-2r1010 16rDEADBEEF 36rZ 8r77
+2r1010 16rDEADBEEF 36rZ 8r77 36rZ
 ---
 (source
+  (number)
   (number)
   (number)
   (number)
@@ -105,17 +106,21 @@ Invalid Numbers (Illegal Characters/Suffixes)
 ==================
 Invalid Radix/BigInt Combinations
 ==================
-2r1010N/3 123N.5
+2r1010N/3 123N.5 0x2r3 2r2 37r0 2r0.4
 ---
 (source 
   (invalid_number) 
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
   (invalid_number))
 
 ==================
 Number Boundary: Terminating Macros (Valid)
 ==================
 123(foo) 123[foo] 123{foo bar} 123"foo" 123;comment
-123\a 123@ref 123~unquote 123`syntax 123'quote
+123\a 123@ref 123~unquote 123`syntax 123'quote 123\12
 ---
 (source
   (number) (list_literal (symbol name: (symbol_name)))
@@ -127,7 +132,8 @@ Number Boundary: Terminating Macros (Valid)
   (number) (deref target: (symbol name: (symbol_name)))
   (number) (unquote target: (symbol name: (symbol_name)))
   (number) (syntax_quote target: (symbol name: (symbol_name)))
-  (number) (quote target: (symbol name: (symbol_name))))
+  (number) (quote target: (symbol name: (symbol_name)))
+  (number) (invalid_character))
 
 ==================
 Number Boundary: Non-Terminating Macros (Invalid)
@@ -145,3 +151,90 @@ Number Boundary: Closing Macros (Valid)
   (vector_literal (number))
   (list_literal (number))
   (map_literal (pair key: (number) value: (number))))
+
+==================
+Valid Exponential (Floats)
+==================
+1e2 1E2 1.5e10 -1e-5 +2E+2 0e0 0.0e0
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Valid Exponential (BigDecimal)
+==================
+1e3M -1.2e-4M 0.5E10M 1e+3
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Invalid Exponential: BigInt (N)
+==================
+1e2N -5E10N
+---
+(source
+  (invalid_number)
+  (invalid_number))
+
+==================
+Invalid Exponential: Malformed
+==================
+1e 1e+ 1e- 1.2e 1e2e3 1e2.5 1.2.3e4
+---
+(source
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (invalid_number))
+
+==================
+Invalid Exponential: Ratios
+==================
+1e2/3 1/2e3
+---
+(source
+  (invalid_number)
+  (invalid_number))
+
+==================
+Exponential vs Hex and Radix
+==================
+0xae 36re2 10re2 2r1e4
+---
+(source
+  (number)
+  (number)
+  (invalid_number)
+  (invalid_number))
+
+==================
+Invalid Suffix Order
+==================
+1Me2 1Ne3
+---
+(source
+  (invalid_number)
+  (invalid_number))
+
+==================
+Exponential Boundary Checks
+==================
+1e2(foo) 1e2'bar 1e2:baz
+---
+(source
+  (number) (list_literal (symbol name: (symbol_name)))
+  (number) (quote target: (symbol name: (symbol_name)))
+  (invalid_number))
