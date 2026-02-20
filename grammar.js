@@ -155,7 +155,8 @@ module.exports = grammar({
       $.unquote,
       $.fn_literal,
       $.reader_conditional,
-      $.tagged_literal
+      $.tagged_literal,
+      $.eval_literal
     ),
 
     quote: $ => prec.right(10, seq(
@@ -211,6 +212,12 @@ module.exports = grammar({
       field('tag', $.symbol),
       repeat($._gap),
       field('target', $._visible_form)
+    )),
+
+    eval_literal: $ => prec.right(10, seq(
+      '#=', 
+      repeat($._gap),
+      field('value', $._visible_form)
     )),
 
     _literal: $ => choice(

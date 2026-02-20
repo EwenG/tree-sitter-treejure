@@ -130,3 +130,53 @@ Syntax Quote skipping discard
     target: (symbol name: (symbol_name))))
 
 
+=========================
+Eval Literal (Basic List)
+=========================
+#=(+ 1 2)
+---
+(source
+  (eval_literal
+    value: (list_literal
+      (symbol
+        name: (symbol_name))
+      (number)
+      (number))))
+
+=====================
+Eval Literal (Symbol)
+=====================
+#=java.version
+---
+(source
+  (eval_literal
+    value: (symbol
+      name: (symbol_name))))
+
+=======================
+Eval Literal (With Gap)
+=======================
+#= (+ 1 2)
+---
+(source
+  (eval_literal
+    value: (list_literal
+      (symbol
+        name: (symbol_name))
+      (number)
+      (number))))
+
+
+=====================
+Eval Literal (Nested)
+=====================
+[#=(* 2 3)]
+---
+(source
+  (vector_literal
+    (eval_literal
+      value: (list_literal
+        (symbol
+          name: (symbol_name))
+        (number)
+        (number)))))

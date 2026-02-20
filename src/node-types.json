@@ -30,6 +30,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -149,6 +153,136 @@
           },
           {
             "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
+            "type": "fn_literal",
+            "named": true
+          },
+          {
+            "type": "keyword",
+            "named": true
+          },
+          {
+            "type": "list_literal",
+            "named": true
+          },
+          {
+            "type": "map_literal",
+            "named": true
+          },
+          {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
+            "type": "nil",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "quote",
+            "named": true
+          },
+          {
+            "type": "reader_conditional",
+            "named": true
+          },
+          {
+            "type": "regex",
+            "named": true
+          },
+          {
+            "type": "set_literal",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
+            "named": true
+          },
+          {
+            "type": "syntax_quote",
+            "named": true
+          },
+          {
+            "type": "tagged_literal",
+            "named": true
+          },
+          {
+            "type": "unquote",
+            "named": true
+          },
+          {
+            "type": "unquote_splicing",
+            "named": true
+          },
+          {
+            "type": "var_quote",
+            "named": true
+          },
+          {
+            "type": "vector_literal",
+            "named": true
+          },
+          {
+            "type": "with_metadata",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "discard",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "eval_literal",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "character",
+            "named": true
+          },
+          {
+            "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
             "named": true
           },
           {
@@ -279,6 +413,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "eval_literal",
           "named": true
         },
         {
@@ -470,6 +608,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "eval_literal",
           "named": true
         },
         {
@@ -707,6 +849,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -806,6 +952,10 @@
           },
           {
             "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
             "named": true
           },
           {
@@ -928,6 +1078,10 @@
           },
           {
             "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
             "named": true
           },
           {
@@ -1110,6 +1264,10 @@
           "named": true
         },
         {
+          "type": "eval_literal",
+          "named": true
+        },
+        {
           "type": "fn_literal",
           "named": true
         },
@@ -1239,6 +1397,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "eval_literal",
           "named": true
         },
         {
@@ -1396,6 +1558,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -1528,6 +1694,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -1647,6 +1817,10 @@
           },
           {
             "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
             "named": true
           },
           {
@@ -1772,6 +1946,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -1891,6 +2069,10 @@
           },
           {
             "type": "deref",
+            "named": true
+          },
+          {
+            "type": "eval_literal",
             "named": true
           },
           {
@@ -2021,6 +2203,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "eval_literal",
           "named": true
         },
         {
@@ -2157,6 +2343,10 @@
             "named": true
           },
           {
+            "type": "eval_literal",
+            "named": true
+          },
+          {
             "type": "fn_literal",
             "named": true
           },
@@ -2268,6 +2458,10 @@
   },
   {
     "type": "#(",
+    "named": false
+  },
+  {
+    "type": "#=",
     "named": false
   },
   {
