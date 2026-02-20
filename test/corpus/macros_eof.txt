@@ -52,9 +52,7 @@ Metadata Value but no Target at EOF
 ==================
 ^:meta
 ---
-(source (with_metadata
-          meta: (metadata
-          value: (keyword name: (symbol_name)))))
+(source (ERROR (metadata value: (keyword name: (symbol_name)))))
 
 ==================
 Discard at EOF

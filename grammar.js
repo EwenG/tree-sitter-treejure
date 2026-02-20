@@ -1,28 +1,24 @@
 module.exports = grammar({
   name: 'treejure',
 
-  extras: $ => [
-    $._whitespace_external,
-    $.comment,
-  ],
+  extras: $ => [],
 
-  conflicts: $ => [
-  ],
+  conflicts: $ => [],
 
   externals: $ => [
     $._whitespace_external,
     $._number_external,
     $._keyword_marker,
     $._auto_resolve_marker,
-    $._identifier_namespace,        // 2: The "ee" in :ee/rr/tt
-    $._identifier_name,             // 3: The "rr/tt" or "foo"
-    $._slash_separator,             // 4: The "/"
-    $._quote_marker,          // '
-    $._syntax_quote_marker,   // `
-    $._deref_marker,          // @
-    $._meta_marker,           // ^
-    $._unquote_marker,        // ~
-    $._unquote_splicing_marker, // ~@
+    $._identifier_namespace,
+    $._identifier_name,
+    $._slash_separator,
+    $._quote_marker,
+    $._syntax_quote_marker,
+    $._deref_marker,
+    $._meta_marker,
+    $._unquote_marker,
+    $._unquote_splicing_marker, 
     $._string_external, 
     $._erroneous_string,
     $._nil,
@@ -37,32 +33,42 @@ module.exports = grammar({
   ],
 
   rules: {
-    source: $ => repeat($._form),
+    source: $ => seq(
+      repeat($._gap),
+      repeat(seq($._form, repeat($._gap)))
+    ),
+
+    _gap: $ => choice(
+      $._whitespace_external,
+      $.comment,
+      $.discard
+    ),
 
     _form: $ => choice(
       $._visible_form,
-      $.discard,
       $.invalid_character,
       $.invalid_number,
       $.invalid_symbol,
       $.invalid_keyword
     ),
 
-    // Excludes 'discard' so macros don't stop at #_
     _visible_form: $ => choice(
       $.with_metadata,
       $._form_base
     ),
 
     // --- METADATA ---
+    // FIXED: Target is now mandatory. This forces the parser to 
+    // skip gaps (discards) to find the target.
     with_metadata: $ => prec.right(10, seq(
       field('meta', $.metadata),
-      repeat($.discard), 
-      field('target', optional($._visible_form))
+      repeat($._gap), 
+      field('target', $._visible_form)
     )),
 
     metadata: $ => seq(
       $._meta_marker,
+      repeat($._gap),
       field('value', choice(
         $.keyword,
         $.symbol,
@@ -77,7 +83,6 @@ module.exports = grammar({
       $._reader_macro
     ),
 
-    // --- COLLECTIONS ---
     _collection: $ => choice(
       $.list_literal,
       $.vector_literal,
@@ -85,27 +90,31 @@ module.exports = grammar({
       $.set_literal
     ),
 
-    list_literal:   $ => seq('(', repeat($._form), ')'),
-    vector_literal: $ => seq('[', repeat($._form), ']'),
-    set_literal:    $ => seq('#{', repeat($._form), '}'),
+    list_literal:   $ => seq('(', repeat(choice($._form, $._gap)), ')'),
+    vector_literal: $ => seq('[', repeat(choice($._form, $._gap)), ']'),
+    set_literal:    $ => seq('#{', repeat(choice($._form, $._gap)), '}'),
+    
     map_literal: $ => seq(
       '{',
       repeat(choice(
         $.pair,
-        $.discard
+        $._gap
       )),
       '}'
     ),
+
+    // FIXED: Changed repeat1($._gap) to repeat($._gap).
+    // 1. Handles {:a:b} (no space).
+    // 2. Handles {:a 1 :b} (last item has no space before '}', triggers MISSING value).
     pair: $ => seq(
       field('key', $._visible_form),
-      repeat($.discard), // This allows {:a #_ "ignore" 1} to be valid
+      repeat($._gap), 
       field('value', $._visible_form)
     ),
 
     _identifier: $ => choice($.symbol, $.keyword),
 
     symbol: $ => choice(
-      field('name', alias($._slash_separator, $.symbol_name)),
       prec(2, seq(
         field('namespace', alias($._identifier_namespace, $.symbol_name)),
         $._slash_separator,
@@ -129,7 +138,6 @@ module.exports = grammar({
       )
     ),
 
-    // --- READER MACROS ---
     _reader_macro: $ => choice(
       $.quote,
       $.syntax_quote,
@@ -144,58 +152,59 @@ module.exports = grammar({
 
     quote: $ => prec.right(10, seq(
       $._quote_marker,
-      repeat($.discard), 
+      repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     syntax_quote: $ => prec.right(10, seq(
       $._syntax_quote_marker,
-      repeat($.discard),
+      repeat($._gap),
       field('target', $._visible_form)
     )),
 
     var_quote: $ => prec.right(10, seq(
       token("#'"), 
-      repeat($.discard), 
+      repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     deref: $ => prec.right(10, seq(
       $._deref_marker,
-      repeat($.discard), 
+      repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     unquote: $ => prec.right(10, seq(
       $._unquote_marker,
-      repeat($.discard), 
+      repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     unquote_splicing: $ => prec.right(10, seq(
       $._unquote_splicing_marker, 
-      repeat($.discard), 
+      repeat($._gap), 
       field('target', $._visible_form)
     )),
     
-    fn_literal: $ => seq(token('#('), repeat($._form), ')'),
+    fn_literal: $ => seq(token('#('), repeat(choice($._form, $._gap)), ')'),
 
     reader_conditional: $ => seq(
       field('marker', choice(
         alias('#?', $.marker),
         alias('#?@', $.marker_splicing)
       )),
+      repeat($._gap),
       field('body', $.list_literal)
     ),
 
     tagged_literal: $ => prec.right(10, seq(
       '#',
+      repeat($._gap),
       field('tag', $.symbol),
-      repeat($.discard),
+      repeat($._gap),
       field('target', $._visible_form)
     )),
 
-    // Ensure specific literals (nil/bool) are chosen over generic external numbers/symbols
     _literal: $ => choice(
       $.nil,
       $.boolean,
@@ -211,12 +220,12 @@ module.exports = grammar({
     string:    $ => $._string_external,
     regex:     $ => $._regex_external,
     character: $ => $._character_external,
+    
     comment:   $ => token(seq(';', /[^\n\r]*/)),
 
-    // Recursively handles chained discards: #_ #_ 1 2
     discard: $ => prec.right(10, seq(
       '#_', 
-      repeat($.discard),
+      repeat($._gap),
       field('target', $._visible_form)
     )),
 

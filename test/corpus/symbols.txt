@@ -1,9 +1,12 @@
 ==================
 Basic Symbols
 ==================
-foo foo-bar baz_quux !? . ..
+foo foo-bar baz_quux !? . .. falsee truee niln
 ---
 (source
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
+  (symbol name: (symbol_name))
   (symbol name: (symbol_name))
   (symbol name: (symbol_name))
   (symbol name: (symbol_name))
@@ -90,22 +93,18 @@ No Collision with Reader Macros
       target: (symbol name: (symbol_name)))))
 
 ==================
-Metadata Missing Target (EOF)
-==================
-^:private
----
-(source
-  (with_metadata
-    meta: (metadata
-      value: (keyword name: (symbol_name)))))
-
-==================
 Complex symbols
 ==================
-e/:
+e/ e /e e/:
 ---
 (source
-  (symbol
-    namespace: (symbol_name)
-    name: (symbol_name)))
+      (symbol
+        name: (symbol_name))
+      (symbol
+        name: (symbol_name))
+      (symbol
+        name: (symbol_name))
+      (symbol
+        namespace: (symbol_name)
+        name: (symbol_name)))
 

@@ -10,11 +10,16 @@ Basic Keyword
 ==================
 Namespaced Keyword (Multi-slash)
 ==================
-:ee/rr/tt
+:ee/rr/tt :ee/# :/
 ---
 (source
   (keyword
     namespace: (symbol_name)
+    name: (symbol_name))
+  (keyword
+    namespace: (symbol_name)
+    name: (symbol_name))
+  (keyword
     name: (symbol_name)))
 
 ==================
@@ -35,3 +40,23 @@ Auto-resolved Namespaced
   (keyword
     namespace: (symbol_name)
     name: (symbol_name)))
+
+==================
+Complex keywords
+==================
+:k/ e :/k
+---
+(source
+      (keyword
+        (symbol_name))
+      (symbol
+        (symbol_name))
+      (keyword
+        (symbol_name)))
+
+==================
+Error keywords
+==================
+:
+---
+(source (ERROR))

@@ -6,7 +6,7 @@
 #include <string.h>
 
 static int scan_character_type(TSLexer *lexer) {
-  lexer->advance(lexer, false); // Consume "\" 
+  lexer->advance(lexer, false); 
   if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
   
   char buffer[32]; int i = 0;
@@ -56,38 +56,56 @@ static int finish_string_content(TSLexer *lexer, int success_type) {
   return ERRONEOUS_STRING;
 }
 
-/**
- * Combined helper to scan Literals (nil, true, false), Namespaces, and Names.
- * This prevents the lexer from advancing and then returning false.
- */
 static bool scan_word(TSLexer *lexer, const bool *valid_symbols, char first_char) {
   char buffer[256];
   int i = 0;
-
   if (first_char != 0) buffer[i++] = first_char;
 
-  // 1. If the parser is ONLY looking for a Name (part after a slash), consume greedily
-  if (valid_symbols[IDENTIFIER_NAME] && !valid_symbols[IDENTIFIER_NAMESPACE]) {
-    while (!is_token_boundary(lexer->lookahead)) {
+  while (!is_token_boundary(lexer->lookahead)) {
+    if (lexer->lookahead == '/') {
+      // SMART SLASH LOGIC:
+      // If we are allowed to return a namespace (start of symbol)
+      // AND the characters following the slash are NOT boundaries:
+      // Then this slash acts as a separator. Stop here.
+      if (valid_symbols[IDENTIFIER_NAMESPACE]) {
+          lexer->mark_end(lexer);
+          lexer->advance(lexer, false); // Consume '/'
+          if (!is_token_boundary(lexer->lookahead)) {
+             // It is a separator (foo/bar).
+             // We return true. The result_symbol (NAMESPACE) will be assigned.
+             // Tree-sitter uses the range up to mark_end (before the slash).
+             // Next scan will resume at the slash.
+             if (i > 0) {
+                 lexer->result_symbol = IDENTIFIER_NAMESPACE;
+                 return true;
+             }
+             // If i==0, we found a slash at start followed by chars (/bar).
+             // If valid_symbols[SLASH] is false here, it's just a name starting with slash.
+             // But if we are in IDENTIFIER_NAMESPACE mode, we usually don't return empty NS.
+             // We fall through to consume it as part of NAME.
+          }
+          // Not a separator (foo/ or foo/ ).
+          // Add slash to buffer and continue.
+          if (i < 255) buffer[i++] = '/';
+          lexer->mark_end(lexer);
+          // Loop continues.
+      } else {
+          // We are in the Name part (bar/baz), or NS is not expected.
+          // Consume slash as part of the name.
+          if (i < 255) buffer[i++] = '/';
+          lexer->advance(lexer, false);
+          lexer->mark_end(lexer);
+      }
+    } else {
       if (i < 255) buffer[i++] = (char)lexer->lookahead;
       lexer->advance(lexer, false);
+      lexer->mark_end(lexer);
     }
-    if (i == 0) return false;
-    lexer->result_symbol = IDENTIFIER_NAME;
-    return true;
-  }
-
-  // 2. Otherwise, consume until a boundary or a slash
-  while (!is_token_boundary(lexer->lookahead) && lexer->lookahead != '/') {
-    if (i < 255) buffer[i++] = (char)lexer->lookahead;
-    lexer->advance(lexer, false);
   }
   buffer[i] = '\0';
+  
+  if (i == 0) return false;
 
-  if (i == 0 && lexer->lookahead != '/') return false;
-
-  // 3. Disambiguate Literals
-  // Only valid if not followed by a slash (e.g., 'true/foo' is a namespace)
   if (lexer->lookahead != '/') {
     if (strcmp(buffer, "nil") == 0 && valid_symbols[NIL_LITERAL]) {
       lexer->result_symbol = NIL_LITERAL; return true;
@@ -100,13 +118,6 @@ static bool scan_word(TSLexer *lexer, const bool *valid_symbols, char first_char
     }
   }
 
-  // 4. Disambiguate Namespace
-  if (lexer->lookahead == '/' && valid_symbols[IDENTIFIER_NAMESPACE]) {
-    lexer->result_symbol = IDENTIFIER_NAMESPACE;
-    return true;
-  }
-
-  // 5. Fallback to Name
   if (valid_symbols[IDENTIFIER_NAME]) {
     lexer->result_symbol = IDENTIFIER_NAME;
     return true;
@@ -121,12 +132,33 @@ unsigned tree_sitter_treejure_external_scanner_serialize(void *payload, char *bu
 void tree_sitter_treejure_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
 
 bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
-  while (is_clojure_whitespace(lexer->lookahead)) lexer->advance(lexer, true);
   if (lexer->lookahead == 0) return false;
-  
+
+  // 1. Whitespace
+  if (is_clojure_whitespace(lexer->lookahead)) {
+    if (valid_symbols[WHITESPACE_EXTERNAL]) {
+      while (is_clojure_whitespace(lexer->lookahead)) {
+        lexer->advance(lexer, false);
+      }
+      lexer->result_symbol = WHITESPACE_EXTERNAL;
+      return true;
+    }
+    return false;
+  }
+
   int32_t first = lexer->lookahead;
 
-  // Reader Macros
+  // 2. Explicit Separator Slash
+  // If we are looking for a separator (after a Namespace), handle '/' specifically.
+  if (first == '/') {
+     if (valid_symbols[SLASH_SEPARATOR] && !valid_symbols[IDENTIFIER_NAME]) {
+         lexer->advance(lexer, false);
+         lexer->result_symbol = SLASH_SEPARATOR;
+         return true;
+     }
+  }
+
+  // 3. Markers & Literals
   if (first == '\\' && (valid_symbols[CHARACTER_EXTERNAL] || valid_symbols[ERRONEOUS_CHARACTER])) {
     lexer->result_symbol = scan_character_type(lexer); return true;
   }
@@ -142,10 +174,8 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
       lexer->result_symbol = finish_string_content(lexer, REGEX_EXTERNAL);
       return true;
     }
-    return false; // Let grammar handle other # dispatchers
+    return false;
   }
-
-  // Simple Markers
   if (first == '~' && (valid_symbols[UNQUOTE_MARKER] || valid_symbols[UNQUOTE_SPLICING_MARKER])) {
     lexer->advance(lexer, false);
     if (lexer->lookahead == '@' && valid_symbols[UNQUOTE_SPLICING_MARKER]) {
@@ -159,7 +189,6 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   if (first == '@' && valid_symbols[DEREF_MARKER]) { lexer->advance(lexer, false); lexer->result_symbol = DEREF_MARKER; return true; }
   if (first == '^' && valid_symbols[META_MARKER]) { lexer->advance(lexer, false); lexer->result_symbol = META_MARKER; return true; }
 
-  // Keywords
   if (first == ':' && (valid_symbols[KEYWORD_MARKER] || valid_symbols[AUTO_RESOLVE_MARKER])) {
     lexer->advance(lexer, false);
     if (lexer->lookahead == ':' && valid_symbols[AUTO_RESOLVE_MARKER]) {
@@ -169,18 +198,12 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
     return false;
   }
 
-  // Slashes
-  if (first == '/' && valid_symbols[SLASH_SEPARATOR]) {
-    lexer->advance(lexer, false); lexer->result_symbol = SLASH_SEPARATOR; return true;
-  }
-
-  // Numbers and Signed Identifiers
+  // 4. Numbers
   if ((first == '+' || first == '-') && (valid_symbols[NUMBER] || valid_symbols[IDENTIFIER_NAME] || valid_symbols[IDENTIFIER_NAMESPACE])) {
     lexer->advance(lexer, false);
     if (isdigit(lexer->lookahead)) {
       return scan_number_word(lexer, first);
     }
-    // Fallback: It's a signed identifier like '+foo' or just '+'
     return scan_word(lexer, valid_symbols, (char)first);
   }
 
@@ -189,7 +212,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
     return scan_number_word(lexer, first);
   }
 
-  // Identifiers and Literals
+  // 5. Identifiers (Word Scanning)
   if (valid_symbols[IDENTIFIER_NAME] || valid_symbols[IDENTIFIER_NAMESPACE] || 
       valid_symbols[NIL_LITERAL] || valid_symbols[BOOL_TRUE] || valid_symbols[BOOL_FALSE]) {
     if (!is_macro_terminating(first)) {
