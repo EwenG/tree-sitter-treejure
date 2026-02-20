@@ -66,3 +66,25 @@ Illegal Regex Gap
 (source 
   (ERROR)
   (string))
+
+================================
+Symbolic Values (Inf, -Inf, NaN)
+================================
+[##Inf ##-Inf ##NaN]
+---
+(source
+  (vector_literal
+    (symbolic_value)
+    (symbolic_value)
+    (symbolic_value)))
+
+===========================
+Symbolic Values as Map Keys
+===========================
+{##NaN "not-a-number"}
+---
+(source
+  (map_literal
+    (pair
+      key: (symbolic_value)
+      value: (string))))

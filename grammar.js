@@ -87,7 +87,8 @@ module.exports = grammar({
       $.list_literal,
       $.vector_literal,
       $.map_literal,
-      $.set_literal
+      $.set_literal,
+      $.namespaced_map_literal
     ),
 
     list_literal:   $ => seq('(', repeat(choice($._form, $._gap)), ')'),
@@ -110,6 +111,13 @@ module.exports = grammar({
       field('key', $._visible_form),
       repeat($._gap), 
       field('value', $._visible_form)
+    ),
+
+    namespaced_map_literal: $ => seq(
+      '#',
+      field('namespace', $.keyword), // Reuse keyword rule which handles :ns or ::ns
+      repeat($._gap),
+      field('body', $.map_literal)
     ),
 
     _identifier: $ => choice($.symbol, $.keyword),
@@ -208,14 +216,21 @@ module.exports = grammar({
     _literal: $ => choice(
       $.nil,
       $.boolean,
+      $.symbolic_value,
       $.number,
       $.string,
       $.regex,
-      $.character
+      $.character,
+      $.symbolic_value
     ),
 
     nil:       $ => $._nil,
     boolean:   $ => choice($._bool_true, $._bool_false),
+    symbolic_value: $ => token(choice(
+      '##Inf',
+      '##-Inf',
+      '##NaN'
+    )),
     number:    $ => $._number_external,
     string:    $ => $._string_external,
     regex:     $ => $._regex_external,

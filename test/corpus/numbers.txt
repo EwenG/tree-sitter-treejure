@@ -75,8 +75,7 @@ Boundary: Reader Macros (#)
   (number)
   (tagged_literal
     tag: (symbol name: (symbol_name))
-    target: (number
-              (MISSING _number_external))))
+    target: (MISSING symbolic_value)))
 
 ==================
 Symbols vs Numbers

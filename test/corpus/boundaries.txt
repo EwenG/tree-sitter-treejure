@@ -60,8 +60,7 @@ and the next token is a keyword.
   (number)
   (tagged_literal
     tag: (symbol name: (symbol_name))
-    target: (number
-              (MISSING _number_external))))
+    target: (MISSING symbolic_value)))
 
 ========================================
 Keyword Boundaries

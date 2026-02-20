@@ -107,3 +107,57 @@ Deeply Nested Discards
         (discard target: (number))
         (number)))
     (number)))
+
+=========================
+Namespaced Map (Standard)
+=========================
+#:person {:first "John" :last "Doe"}
+---
+(source
+  (namespaced_map_literal
+    namespace: (keyword name: (symbol_name))
+    body: (map_literal
+            (pair
+              key: (keyword name: (symbol_name))
+              value: (string))
+            (pair
+              key: (keyword name: (symbol_name))
+              value: (string)))))
+
+==============================
+Namespaced Map (Auto-resolved)
+==============================
+#::user{:id 100}
+---
+(source
+  (namespaced_map_literal
+    namespace: (keyword name: (symbol_name))
+    body: (map_literal
+            (pair
+              key: (keyword name: (symbol_name))
+              value: (number)))))
+
+==================================
+Namespaced Map (Complex Namespace)
+==================================
+#:com.example/my-ns{:valid? true}
+---
+(source
+  (namespaced_map_literal
+    namespace: (keyword
+      namespace: (symbol_name)
+      name: (symbol_name))
+    body: (map_literal
+      (pair
+      key: (keyword name: (symbol_name))
+        value: (boolean)))))
+
+======================
+Namespaced Map (Empty)
+======================
+#:foo{}
+---
+(source
+  (namespaced_map_literal
+    namespace: (keyword name: (symbol_name))
+    body: (map_literal)))
