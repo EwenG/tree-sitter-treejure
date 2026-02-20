@@ -7,6 +7,7 @@
 #include <string.h>
 
 enum TokenType {
+  WHITESPACE_EXTERNAL,
   NUMBER,
   KEYWORD_MARKER,
   AUTO_RESOLVE_MARKER,
