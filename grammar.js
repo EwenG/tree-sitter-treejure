@@ -1,13 +1,8 @@
-// A precise set of Clojure whitespace: 
-// standard \s (space, tab, newline, etc) + comma + specific Unicode separators
-const WHITESPACE_CHAR = /[ ,\t\r\n\f\v\u00A0\u00AD\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
-const WHITESPACE = token(repeat1(WHITESPACE_CHAR));
-
 module.exports = grammar({
   name: 'treejure',
 
   extras: $ => [
-    WHITESPACE,
+    $._whitespace_external,
     $.comment,
   ],
 
@@ -15,6 +10,7 @@ module.exports = grammar({
   ],
 
   externals: $ => [
+    $._whitespace_external,
     $._number_external,
     $._keyword_marker,
     $._auto_resolve_marker,
@@ -47,7 +43,9 @@ module.exports = grammar({
       $._visible_form,
       $.discard,
       $.invalid_character,
-      $.invalid_number
+      $.invalid_number,
+      $.invalid_symbol,
+      $.invalid_keyword
     ),
 
     // Excludes 'discard' so macros don't stop at #_
@@ -224,5 +222,7 @@ module.exports = grammar({
 
     invalid_character: $ => $._erroneous_character,
     invalid_number:    $ => $._erroneous_number,
+    invalid_symbol: $ => $._erroneous_symbol,
+    invalid_keyword: $ => $._erroneous_keyword,
   }
 });
