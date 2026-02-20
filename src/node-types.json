@@ -46,6 +46,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -75,6 +79,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -112,6 +120,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -156,6 +168,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -185,6 +201,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -223,6 +243,10 @@
       "required": false,
       "types": [
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "discard",
           "named": true
         }
@@ -246,6 +270,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "deref",
           "named": true
         },
@@ -262,7 +290,15 @@
           "named": true
         },
         {
+          "type": "invalid_keyword",
+          "named": true
+        },
+        {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -275,6 +311,10 @@
         },
         {
           "type": "map_literal",
+          "named": true
+        },
+        {
+          "type": "namespaced_map_literal",
           "named": true
         },
         {
@@ -307,6 +347,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "symbolic_value",
           "named": true
         },
         {
@@ -346,7 +390,17 @@
     "fields": {}
   },
   {
+    "type": "invalid_keyword",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "invalid_number",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "invalid_symbol",
     "named": true,
     "fields": {}
   },
@@ -407,6 +461,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "deref",
           "named": true
         },
@@ -423,7 +481,15 @@
           "named": true
         },
         {
+          "type": "invalid_keyword",
+          "named": true
+        },
+        {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -436,6 +502,10 @@
         },
         {
           "type": "map_literal",
+          "named": true
+        },
+        {
+          "type": "namespaced_map_literal",
           "named": true
         },
         {
@@ -468,6 +538,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "symbolic_value",
           "named": true
         },
         {
@@ -510,6 +584,10 @@
       "required": false,
       "types": [
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "discard",
           "named": true
         },
@@ -542,6 +620,60 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "discard",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "namespaced_map_literal",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "map_literal",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "keyword",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "discard",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -591,6 +723,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -620,6 +756,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -685,6 +825,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -714,6 +858,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -751,6 +899,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -795,6 +947,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -824,6 +980,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -862,6 +1022,10 @@
       "required": false,
       "types": [
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "discard",
           "named": true
         }
@@ -896,6 +1060,20 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "discard",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -920,6 +1098,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "deref",
           "named": true
         },
@@ -936,7 +1118,15 @@
           "named": true
         },
         {
+          "type": "invalid_keyword",
+          "named": true
+        },
+        {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -949,6 +1139,10 @@
         },
         {
           "type": "map_literal",
+          "named": true
+        },
+        {
+          "type": "namespaced_map_literal",
           "named": true
         },
         {
@@ -981,6 +1175,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "symbolic_value",
           "named": true
         },
         {
@@ -1032,6 +1230,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "deref",
           "named": true
         },
@@ -1048,7 +1250,15 @@
           "named": true
         },
         {
+          "type": "invalid_keyword",
+          "named": true
+        },
+        {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -1061,6 +1271,10 @@
         },
         {
           "type": "map_literal",
+          "named": true
+        },
+        {
+          "type": "namespaced_map_literal",
           "named": true
         },
         {
@@ -1093,6 +1307,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "symbolic_value",
           "named": true
         },
         {
@@ -1194,6 +1412,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -1223,6 +1445,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1260,6 +1486,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -1314,6 +1544,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -1343,6 +1577,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1380,6 +1618,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -1424,6 +1666,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -1453,6 +1699,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1490,6 +1740,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -1534,6 +1788,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -1563,6 +1821,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1600,6 +1862,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -1644,6 +1910,10 @@
             "named": true
           },
           {
+            "type": "namespaced_map_literal",
+            "named": true
+          },
+          {
             "type": "nil",
             "named": true
           },
@@ -1673,6 +1943,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1711,6 +1985,10 @@
       "required": false,
       "types": [
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "discard",
           "named": true
         }
@@ -1734,6 +2012,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "deref",
           "named": true
         },
@@ -1750,7 +2032,15 @@
           "named": true
         },
         {
+          "type": "invalid_keyword",
+          "named": true
+        },
+        {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -1763,6 +2053,10 @@
         },
         {
           "type": "map_literal",
+          "named": true
+        },
+        {
+          "type": "namespaced_map_literal",
           "named": true
         },
         {
@@ -1795,6 +2089,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "symbolic_value",
           "named": true
         },
         {
@@ -1844,7 +2142,7 @@
       },
       "target": {
         "multiple": false,
-        "required": false,
+        "required": true,
         "types": [
           {
             "type": "boolean",
@@ -1872,6 +2170,10 @@
           },
           {
             "type": "map_literal",
+            "named": true
+          },
+          {
+            "type": "namespaced_map_literal",
             "named": true
           },
           {
@@ -1904,6 +2206,10 @@
           },
           {
             "type": "symbol",
+            "named": true
+          },
+          {
+            "type": "symbolic_value",
             "named": true
           },
           {
@@ -1941,6 +2247,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "comment",
+          "named": true
+        },
         {
           "type": "discard",
           "named": true
@@ -1994,8 +2304,7 @@
   },
   {
     "type": "comment",
-    "named": true,
-    "extra": true
+    "named": true
   },
   {
     "type": "marker",
@@ -2007,6 +2316,10 @@
   },
   {
     "type": "symbol_name",
+    "named": true
+  },
+  {
+    "type": "symbolic_value",
     "named": true
   },
   {
