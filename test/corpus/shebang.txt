@@ -1,0 +1,60 @@
+==================
+Basic Shebang
+==================
+#!/usr/bin/env bb
+---
+(source
+  (shebang))
+
+==================
+Shebang with Code
+==================
+#!/usr/bin/clojure
+(ns main)
+---
+(source
+  (shebang)
+  (list_literal
+    (symbol (symbol_name))
+    (symbol (symbol_name))))
+
+==================
+Shebang Not At Start
+==================
+ ; comment first
+#!/usr/bin/bb
+---
+(source
+  (comment)
+  (ERROR (shebang)))
+
+==================
+Empty Shebang
+==================
+#!
+(def x 1)
+---
+(source
+  (shebang)
+  (list_literal
+    (symbol (symbol_name))
+    (symbol (symbol_name))
+    (number)))
+
+==================
+Shebang with Complex Gaps
+==================
+#!/usr/bin/bb
+
+;; This is a script
+;; Version 1.0
+
+(println "Hello")
+---
+(source
+  (shebang)
+  (comment)
+  (comment)
+  (list_literal
+    (symbol (symbol_name))
+    (string)))
