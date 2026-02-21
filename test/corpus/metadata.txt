@@ -88,7 +88,7 @@ Metadata String with Discard Gap
 (source
   (with_metadata
     meta: (metadata
-      (discard (symbol name: (symbol_name)))
+      (discard target: (symbol name: (symbol_name)))
       value: (string))
     target: (symbol name: (symbol_name))))
 

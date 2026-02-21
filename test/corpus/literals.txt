@@ -35,28 +35,28 @@ Basic Regex
 ==================
 #"^[a-z]+$"
 ---
-(source (regex))
+(source (regex (string)))
 
 ==================
 Regex with Escaped Quote
 ==================
 #"abc\"def"
 ---
-(source (regex))
+(source (regex (string)))
 
 ==================
 Regex with Escaped Backslash (Boundary Check)
 ==================
 #"\\\\"
 ---
-(source (regex))
+(source (regex (string)))
 
 ==================
 Regex containing Clojure delimiters
 ==================
 #"[()\[\]{}]"
 ---
-(source (regex))
+(source (regex (string)))
 
 ==================
 Illegal Regex Gap

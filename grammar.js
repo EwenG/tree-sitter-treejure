@@ -29,7 +29,7 @@ module.exports = grammar({
     $._erroneous_keyword,
     $._erroneous_symbol,
     $._erroneous_number,
-    $._regex_external,
+    $._regex_marker,
   ],
 
   rules: {
@@ -240,7 +240,10 @@ module.exports = grammar({
     
     number:    $ => $._number_external,
     string:    $ => $._string_external,
-    regex:     $ => $._regex_external,
+    regex:     $ => seq(
+      field('marker', alias($._regex_marker, '#')),
+      field('value', $.string)
+    ),
     character: $ => $._character_external,
     
     // Updated to include shebang line as a special comment

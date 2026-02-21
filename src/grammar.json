@@ -1011,8 +1011,30 @@
       "name": "_string_external"
     },
     "regex": {
-      "type": "SYMBOL",
-      "name": "_regex_external"
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "marker",
+          "content": {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_regex_marker"
+            },
+            "named": false,
+            "value": "#"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "value",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string"
+          }
+        }
+      ]
     },
     "character": {
       "type": "SYMBOL",
@@ -1193,7 +1215,7 @@
     },
     {
       "type": "SYMBOL",
-      "name": "_regex_external"
+      "name": "_regex_marker"
     }
   ],
   "inline": [],

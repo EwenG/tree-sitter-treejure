@@ -152,11 +152,10 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
     lexer->result_symbol = finish_string_content(lexer, STRING_EXTERNAL);
     return true;
   }
-  if (first == '#' && valid_symbols[REGEX_EXTERNAL]) {
+  if (first == '#' && valid_symbols[REGEX_MARKER]) {
     lexer->advance(lexer, false);
     if (lexer->lookahead == '"') {
-      lexer->advance(lexer, false);
-      lexer->result_symbol = finish_string_content(lexer, REGEX_EXTERNAL);
+      lexer->result_symbol = REGEX_MARKER;
       return true;
     }
     return false;
@@ -202,9 +201,18 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
       valid_symbols[NIL_LITERAL] || valid_symbols[BOOL_TRUE] || valid_symbols[BOOL_FALSE]) {
     
     if (!is_macro_terminating(first)) {
+      
+      // '#' and '\'' are not completely macro terminating because they can appear natively 
+      // inside identifiers. However, they are reader macros, thus they cannot START an identifier 
+      // at the beginning of a form. We safely fallback so the internal lexer handles them accurately.
+      if ((first == '#' || first == '\'') && valid_symbols[KEYWORD_MARKER]) {
+        return false;
+      }
+      
       return scan_word(lexer, valid_symbols, 0);
     }
   }
 
   return false;
 }
+
