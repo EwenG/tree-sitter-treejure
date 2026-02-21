@@ -88,3 +88,11 @@ Symbolic Values as Map Keys
     (pair
       key: (symbolic_value)
       value: (string))))
+
+=======================
+Invalid Symbolic Values
+=======================
+##NaNa
+---
+(source
+  (erroneous_symbolic_value))

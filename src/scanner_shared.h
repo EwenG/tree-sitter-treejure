@@ -21,7 +21,9 @@ enum TokenType {
   CHARACTER_EXTERNAL, ERRONEOUS_CHARACTER,
   ERRONEOUS_KEYWORD, ERRONEOUS_SYMBOL,
   ERRONEOUS_NUMBER,
-  REGEX_MARKER
+  REGEX_MARKER,
+  SYMBOLIC_VALUE,
+  ERRONEOUS_SYMBOLIC_VALUE
 };
 
 static bool is_clojure_whitespace(int32_t c) {
@@ -51,3 +53,4 @@ static bool is_token_boundary(int32_t c) {
 }
 
 #endif
+

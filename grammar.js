@@ -30,6 +30,8 @@ module.exports = grammar({
     $._erroneous_symbol,
     $._erroneous_number,
     $._regex_marker,
+    $._symbolic_value,
+    $._erroneous_symbolic_value,
   ],
 
   rules: {
@@ -51,7 +53,8 @@ module.exports = grammar({
       $.invalid_character,
       $.invalid_number,
       $.invalid_symbol,
-      $.invalid_keyword
+      $.invalid_keyword,
+      $.erroneous_symbolic_value
     ),
 
     _visible_form: $ => choice(
@@ -224,19 +227,14 @@ module.exports = grammar({
       $.number,
       $.string,
       $.regex,
-      $.character,
-      $.symbolic_value
+      $.character
     ),
 
     nil:       $ => $._nil,
     boolean:   $ => choice($._bool_true, $._bool_false),
     
-    // Explicit token definition for symbolic values
-    symbolic_value: $ => token(choice(
-      '##Inf',
-      '##-Inf',
-      '##NaN'
-    )),
+    symbolic_value: $ => $._symbolic_value,
+    erroneous_symbolic_value: $ => $._erroneous_symbolic_value,
     
     number:    $ => $._number_external,
     string:    $ => $._string_external,
@@ -262,3 +260,4 @@ module.exports = grammar({
     invalid_keyword: $ => $._erroneous_keyword,
   }
 });
+

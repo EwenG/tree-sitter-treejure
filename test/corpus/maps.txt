@@ -144,7 +144,7 @@ Map Parity Error (Odd number of forms)
     (pair key: (keyword name: (symbol_name)) value: (number))
     (pair
       key: (keyword name: (symbol_name))
-      value: (MISSING symbolic_value))))
+      value: (number (MISSING _number_external)))))
 
 ==================
 Complex Keys (Vectors as Keys)

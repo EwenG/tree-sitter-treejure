@@ -84,6 +84,10 @@
         {
           "type": "SYMBOL",
           "name": "invalid_keyword"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "erroneous_symbolic_value"
         }
       ]
     },
@@ -958,10 +962,6 @@
         {
           "type": "SYMBOL",
           "name": "character"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "symbolic_value"
         }
       ]
     },
@@ -983,24 +983,12 @@
       ]
     },
     "symbolic_value": {
-      "type": "TOKEN",
-      "content": {
-        "type": "CHOICE",
-        "members": [
-          {
-            "type": "STRING",
-            "value": "##Inf"
-          },
-          {
-            "type": "STRING",
-            "value": "##-Inf"
-          },
-          {
-            "type": "STRING",
-            "value": "##NaN"
-          }
-        ]
-      }
+      "type": "SYMBOL",
+      "name": "_symbolic_value"
+    },
+    "erroneous_symbolic_value": {
+      "type": "SYMBOL",
+      "name": "_erroneous_symbolic_value"
     },
     "number": {
       "type": "SYMBOL",
@@ -1216,6 +1204,14 @@
     {
       "type": "SYMBOL",
       "name": "_regex_marker"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_symbolic_value"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_erroneous_symbolic_value"
     }
   ],
   "inline": [],

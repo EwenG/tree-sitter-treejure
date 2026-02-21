@@ -91,4 +91,4 @@ Tagged Literal Tag but no Target at EOF
 (source
   (tagged_literal
     tag: (symbol name: (symbol_name))
-    target: (MISSING symbolic_value)))
+    target: (number (MISSING _number_external))))

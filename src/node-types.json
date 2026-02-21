@@ -262,6 +262,11 @@
     }
   },
   {
+    "type": "erroneous_symbolic_value",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "eval_literal",
     "named": true,
     "fields": {
@@ -413,6 +418,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "erroneous_symbolic_value",
           "named": true
         },
         {
@@ -608,6 +617,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "erroneous_symbolic_value",
           "named": true
         },
         {
@@ -1289,6 +1302,10 @@
           "named": true
         },
         {
+          "type": "erroneous_symbolic_value",
+          "named": true
+        },
+        {
           "type": "eval_literal",
           "named": true
         },
@@ -1422,6 +1439,10 @@
         },
         {
           "type": "discard",
+          "named": true
+        },
+        {
+          "type": "erroneous_symbolic_value",
           "named": true
         },
         {
@@ -1565,6 +1586,11 @@
         ]
       }
     }
+  },
+  {
+    "type": "symbolic_value",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "syntax_quote",
@@ -2235,6 +2261,10 @@
           "named": true
         },
         {
+          "type": "erroneous_symbolic_value",
+          "named": true
+        },
+        {
           "type": "eval_literal",
           "named": true
         },
@@ -2543,10 +2573,6 @@
   },
   {
     "type": "symbol_name",
-    "named": true
-  },
-  {
-    "type": "symbolic_value",
     "named": true
   },
   {

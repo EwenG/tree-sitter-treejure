@@ -152,12 +152,49 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
     lexer->result_symbol = finish_string_content(lexer, STRING_EXTERNAL);
     return true;
   }
-  if (first == '#' && valid_symbols[REGEX_MARKER]) {
+  if (first == '#' && (valid_symbols[REGEX_MARKER] || valid_symbols[SYMBOLIC_VALUE] || valid_symbols[ERRONEOUS_SYMBOLIC_VALUE])) {
     lexer->advance(lexer, false);
-    if (lexer->lookahead == '"') {
+    
+    // Regex string start (#")
+    if (lexer->lookahead == '"' && valid_symbols[REGEX_MARKER]) {
       lexer->result_symbol = REGEX_MARKER;
       return true;
     }
+
+    // Symbolic values (##...)
+    if (lexer->lookahead == '#' && (valid_symbols[SYMBOLIC_VALUE] || valid_symbols[ERRONEOUS_SYMBOLIC_VALUE])) {
+      lexer->advance(lexer, false); // Consume the second '#'
+      
+      char buffer[32];
+      int i = 0;
+      
+      while (!is_token_boundary(lexer->lookahead)) {
+        if (i < 31) {
+          buffer[i++] = (char)lexer->lookahead;
+        } else {
+          i++; // Keep tracking length to accurately evaluate the fallback
+        }
+        lexer->advance(lexer, false);
+      }
+      
+      if (i > 0 && i < 31) {
+        buffer[i] = '\0';
+        if (valid_symbols[SYMBOLIC_VALUE] && 
+           (strcmp(buffer, "Inf") == 0 || strcmp(buffer, "-Inf") == 0 || strcmp(buffer, "NaN") == 0)) {
+          lexer->result_symbol = SYMBOLIC_VALUE;
+          return true;
+        }
+      }
+      
+      // Since it is '##' but not a valid payload, fallback as an error
+      if (valid_symbols[ERRONEOUS_SYMBOLIC_VALUE]) {
+        lexer->result_symbol = ERRONEOUS_SYMBOLIC_VALUE;
+        return true;
+      }
+      return false;
+    }
+
+    // Returning false lets Tree-sitter try its internal keywords (like '#_', '#{', etc) cleanly
     return false;
   }
   if (first == '~' && (valid_symbols[UNQUOTE_MARKER] || valid_symbols[UNQUOTE_SPLICING_MARKER])) {
@@ -205,7 +242,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
       // '#' and '\'' are not completely macro terminating because they can appear natively 
       // inside identifiers. However, they are reader macros, thus they cannot START an identifier 
       // at the beginning of a form. We safely fallback so the internal lexer handles them accurately.
-      if ((first == '#' || first == '\'') && valid_symbols[KEYWORD_MARKER]) {
+      if ((first == '#' || first == '\'') && valid_symbols[IDENTIFIER_NAMESPACE]) {
         return false;
       }
       
@@ -215,4 +252,3 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
 
   return false;
 }
-
