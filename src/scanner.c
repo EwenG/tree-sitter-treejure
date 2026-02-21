@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <string.h>
 
+// ... [scan_character_type function (unchanged)] ...
 static int scan_character_type(TSLexer *lexer) {
   lexer->advance(lexer, false); 
   if (lexer->lookahead == 0) return ERRONEOUS_CHARACTER;
@@ -37,6 +38,7 @@ static int scan_character_type(TSLexer *lexer) {
   return ERRONEOUS_CHARACTER;
 }
 
+// ... [finish_string_content function (unchanged)] ...
 static int finish_string_content(TSLexer *lexer, int success_type) {
   bool escaped = false;
   while (lexer->lookahead != 0) {
@@ -56,6 +58,7 @@ static int finish_string_content(TSLexer *lexer, int success_type) {
   return ERRONEOUS_STRING;
 }
 
+// ... [scan_word function (unchanged)] ...
 static bool scan_word(TSLexer *lexer, const bool *valid_symbols, char first_char) {
   char buffer[256];
   int i = 0;
@@ -63,35 +66,18 @@ static bool scan_word(TSLexer *lexer, const bool *valid_symbols, char first_char
 
   while (!is_token_boundary(lexer->lookahead)) {
     if (lexer->lookahead == '/') {
-      // SMART SLASH LOGIC:
-      // If we are allowed to return a namespace (start of symbol)
-      // AND the characters following the slash are NOT boundaries:
-      // Then this slash acts as a separator. Stop here.
       if (valid_symbols[IDENTIFIER_NAMESPACE]) {
           lexer->mark_end(lexer);
-          lexer->advance(lexer, false); // Consume '/'
+          lexer->advance(lexer, false); 
           if (!is_token_boundary(lexer->lookahead)) {
-             // It is a separator (foo/bar).
-             // We return true. The result_symbol (NAMESPACE) will be assigned.
-             // Tree-sitter uses the range up to mark_end (before the slash).
-             // Next scan will resume at the slash.
              if (i > 0) {
                  lexer->result_symbol = IDENTIFIER_NAMESPACE;
                  return true;
              }
-             // If i==0, we found a slash at start followed by chars (/bar).
-             // If valid_symbols[SLASH] is false here, it's just a name starting with slash.
-             // But if we are in IDENTIFIER_NAMESPACE mode, we usually don't return empty NS.
-             // We fall through to consume it as part of NAME.
           }
-          // Not a separator (foo/ or foo/ ).
-          // Add slash to buffer and continue.
           if (i < 255) buffer[i++] = '/';
           lexer->mark_end(lexer);
-          // Loop continues.
       } else {
-          // We are in the Name part (bar/baz), or NS is not expected.
-          // Consume slash as part of the name.
           if (i < 255) buffer[i++] = '/';
           lexer->advance(lexer, false);
           lexer->mark_end(lexer);
@@ -149,7 +135,6 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   int32_t first = lexer->lookahead;
 
   // 2. Explicit Separator Slash
-  // If we are looking for a separator (after a Namespace), handle '/' specifically.
   if (first == '/') {
      if (valid_symbols[SLASH_SEPARATOR] && !valid_symbols[IDENTIFIER_NAME]) {
          lexer->advance(lexer, false);
@@ -215,6 +200,7 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   // 5. Identifiers (Word Scanning)
   if (valid_symbols[IDENTIFIER_NAME] || valid_symbols[IDENTIFIER_NAMESPACE] || 
       valid_symbols[NIL_LITERAL] || valid_symbols[BOOL_TRUE] || valid_symbols[BOOL_FALSE]) {
+    
     if (!is_macro_terminating(first)) {
       return scan_word(lexer, valid_symbols, 0);
     }

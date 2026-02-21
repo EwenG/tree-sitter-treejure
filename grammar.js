@@ -33,7 +33,9 @@ module.exports = grammar({
   ],
 
   rules: {
+    // Added optional shebang at the start
     source: $ => seq(
+      optional($.shebang),
       repeat($._gap),
       repeat(seq($._form, repeat($._gap)))
     ),
@@ -57,9 +59,6 @@ module.exports = grammar({
       $._form_base
     ),
 
-    // --- METADATA ---
-    // FIXED: Target is now mandatory. This forces the parser to 
-    // skip gaps (discards) to find the target.
     with_metadata: $ => prec.right(10, seq(
       field('meta', $.metadata),
       repeat($._gap), 
@@ -72,6 +71,7 @@ module.exports = grammar({
       field('value', choice(
         $.keyword,
         $.symbol,
+        $.string,
         $.map_literal
       ))
     ),
@@ -104,9 +104,6 @@ module.exports = grammar({
       '}'
     ),
 
-    // FIXED: Changed repeat1($._gap) to repeat($._gap).
-    // 1. Handles {:a:b} (no space).
-    // 2. Handles {:a 1 :b} (last item has no space before '}', triggers MISSING value).
     pair: $ => seq(
       field('key', $._visible_form),
       repeat($._gap), 
@@ -115,7 +112,7 @@ module.exports = grammar({
 
     namespaced_map_literal: $ => seq(
       '#',
-      field('namespace', $.keyword), // Reuse keyword rule which handles :ns or ::ns
+      field('namespace', $.keyword), 
       repeat($._gap),
       field('body', $.map_literal)
     ),
@@ -233,17 +230,22 @@ module.exports = grammar({
 
     nil:       $ => $._nil,
     boolean:   $ => choice($._bool_true, $._bool_false),
+    
+    // Explicit token definition for symbolic values
     symbolic_value: $ => token(choice(
       '##Inf',
       '##-Inf',
       '##NaN'
     )),
+    
     number:    $ => $._number_external,
     string:    $ => $._string_external,
     regex:     $ => $._regex_external,
     character: $ => $._character_external,
     
-    comment:   $ => token(seq(';', /[^\n\r]*/)),
+    // Updated to include shebang line as a special comment
+    shebang: $ => token(seq('#!', /[^\n\r]*/)),
+    comment: $ => token(seq(';', /[^\n\r]*/)),
 
     discard: $ => prec.right(10, seq(
       '#_', 

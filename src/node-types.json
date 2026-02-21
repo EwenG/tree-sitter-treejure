@@ -757,6 +757,10 @@
             "named": true
           },
           {
+            "type": "string",
+            "named": true
+          },
+          {
             "type": "symbol",
             "named": true
           }
@@ -1461,6 +1465,10 @@
         },
         {
           "type": "set_literal",
+          "named": true
+        },
+        {
+          "type": "shebang",
           "named": true
         },
         {
@@ -2506,6 +2514,10 @@
   },
   {
     "type": "marker_splicing",
+    "named": true
+  },
+  {
+    "type": "shebang",
     "named": true
   },
   {

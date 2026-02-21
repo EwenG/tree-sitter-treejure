@@ -12,3 +12,85 @@ Recursive Metadata
         (symbol name: (symbol_name))
         (symbol name: (symbol_name))
         (number)))))
+
+==================
+Metadata String Basic
+==================
+^"java.lang.String" x
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (string))
+    target: (symbol name: (symbol_name))))
+
+==================
+Metadata String with Gaps
+==================
+^  "secret-key"  
+;; some comment
+[1 2 3]
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (string))
+    (comment)
+    target: (vector_literal (number) (number) (number))))
+
+==================
+Chained Metadata Mixed
+==================
+^:private ^"static" my-var
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (keyword name: (symbol_name)))
+    target: (with_metadata
+      meta: (metadata
+        value: (string))
+      target: (symbol name: (symbol_name)))))
+
+
+==================
+Metadata String on List
+==================
+^"custom-tag" (println "hi")
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (string))
+    target: (list_literal
+      (symbol name: (symbol_name))
+      (string))))
+
+
+==================
+Metadata Multi-line String
+==================
+^"This is a very
+long tag"
+target-symbol
+---
+(source
+  (with_metadata
+    meta: (metadata
+      value: (string))
+    target: (symbol name: (symbol_name))))
+
+==================
+Metadata String with Discard Gap
+==================
+^ #_ discarded-symbol "tag" result
+---
+(source
+  (with_metadata
+    meta: (metadata
+      (discard (symbol name: (symbol_name)))
+      value: (string))
+    target: (symbol name: (symbol_name))))
+
+
+          

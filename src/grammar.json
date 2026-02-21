@@ -6,6 +6,18 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "shebang"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "REPEAT",
           "content": {
             "type": "SYMBOL",
@@ -147,6 +159,10 @@
               {
                 "type": "SYMBOL",
                 "name": "symbol"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "string"
               },
               {
                 "type": "SYMBOL",
@@ -1001,6 +1017,22 @@
     "character": {
       "type": "SYMBOL",
       "name": "_character_external"
+    },
+    "shebang": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "#!"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[^\\n\\r]*"
+          }
+        ]
+      }
     },
     "comment": {
       "type": "TOKEN",
