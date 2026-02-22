@@ -29,6 +29,17 @@ Macro Skipping Multiple Discards
     target: (symbol name: (symbol_name))))
 
 ==================
+Multiple discards
+==================
+#_#_ 1 2
+---
+(source
+      (discard
+        (discard
+          target: (number))
+        target: (number)))
+
+==================
 Metadata wrapping a Quote
 ==================
 ^:private 'foo
