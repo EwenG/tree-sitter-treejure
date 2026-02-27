@@ -772,6 +772,16 @@
     "type": "tagged_literal",
     "named": true,
     "fields": {
+      "marker": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "#",
+            "named": false
+          }
+        ]
+      },
       "tag": {
         "multiple": false,
         "required": true,
@@ -872,6 +882,16 @@
     "type": "var_quote",
     "named": true,
     "fields": {
+      "marker": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "#'",
+            "named": false
+          }
+        ]
+      },
       "target": {
         "multiple": false,
         "required": true,

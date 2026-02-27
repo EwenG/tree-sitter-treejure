@@ -618,8 +618,12 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "SYMBOL",
-            "name": "_quote_marker"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_quote_marker"
+            }
           },
           {
             "type": "REPEAT",
@@ -646,8 +650,12 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "SYMBOL",
-            "name": "_syntax_quote_marker"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_syntax_quote_marker"
+            }
           },
           {
             "type": "REPEAT",
@@ -674,10 +682,14 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "TOKEN",
+            "type": "FIELD",
+            "name": "marker",
             "content": {
-              "type": "STRING",
-              "value": "#'"
+              "type": "TOKEN",
+              "content": {
+                "type": "STRING",
+                "value": "#'"
+              }
             }
           },
           {
@@ -705,8 +717,12 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "SYMBOL",
-            "name": "_deref_marker"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_deref_marker"
+            }
           },
           {
             "type": "REPEAT",
@@ -761,8 +777,12 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "SYMBOL",
-            "name": "_unquote_splicing_marker"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_unquote_splicing_marker"
+            }
           },
           {
             "type": "REPEAT",
@@ -868,8 +888,15 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "STRING",
-            "value": "#"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "TOKEN",
+              "content": {
+                "type": "STRING",
+                "value": "#"
+              }
+            }
           },
           {
             "type": "REPEAT",

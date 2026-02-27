@@ -164,25 +164,25 @@ module.exports = grammar({
     ),
 
     quote: $ => prec.right(10, seq(
-      $._quote_marker,
+      field('marker', $._quote_marker),
       repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     syntax_quote: $ => prec.right(10, seq(
-      $._syntax_quote_marker,
+      field('marker', $._syntax_quote_marker),
       repeat($._gap),
       field('target', $._visible_form)
     )),
 
     var_quote: $ => prec.right(10, seq(
-      token("#'"), 
+      field('marker', token("#'")), 
       repeat($._gap), 
       field('target', $._visible_form)
     )),
 
     deref: $ => prec.right(10, seq(
-      $._deref_marker,
+      field('marker', $._deref_marker),
       repeat($._gap), 
       field('target', $._visible_form)
     )),
@@ -194,7 +194,7 @@ module.exports = grammar({
     )),
 
     unquote_splicing: $ => prec.right(10, seq(
-      $._unquote_splicing_marker, 
+      field('marker', $._unquote_splicing_marker),
       repeat($._gap), 
       field('target', $._visible_form)
     )),
@@ -211,7 +211,7 @@ module.exports = grammar({
     ),
 
     tagged_literal: $ => prec.right(10, seq(
-      '#',
+      field('marker', token("#")),
       repeat($._gap),
       field('tag', $.symbol),
       repeat($._gap),
