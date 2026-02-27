@@ -34,6 +34,10 @@ module.exports = grammar({
     $._erroneous_symbolic_value,
   ],
 
+  supertypes: $ => [
+    $._visible_form
+  ],
+
   rules: {
     // Added optional shebang at the start
     source: $ => seq(

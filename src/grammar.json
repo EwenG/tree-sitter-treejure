@@ -1215,6 +1215,8 @@
     }
   ],
   "inline": [],
-  "supertypes": [],
+  "supertypes": [
+    "_visible_form"
+  ],
   "reserved": {}
 }
