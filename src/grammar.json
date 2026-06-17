@@ -374,8 +374,22 @@
           "type": "FIELD",
           "name": "namespace",
           "content": {
-            "type": "SYMBOL",
-            "name": "keyword"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "keyword"
+              },
+              {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_auto_resolve_marker"
+                },
+                "named": false,
+                "value": "::"
+              }
+            ]
           }
         },
         {

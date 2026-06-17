@@ -427,6 +427,10 @@
         "required": true,
         "types": [
           {
+            "type": "::",
+            "named": false
+          },
+          {
             "type": "keyword",
             "named": true
           }

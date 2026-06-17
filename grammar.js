@@ -116,7 +116,12 @@ module.exports = grammar({
 
     namespaced_map_literal: $ => seq(
       '#',
-      field('namespace', $.keyword), 
+      // `#:foo{...}` / `#::alias{...}` carry a keyword namespace; `#::{...}`
+      // auto-resolves to the current namespace and has a bare `::` with no name.
+      field('namespace', choice(
+        $.keyword,
+        alias($._auto_resolve_marker, '::')
+      )),
       repeat($._gap),
       field('body', $.map_literal)
     ),

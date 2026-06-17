@@ -161,3 +161,15 @@ Namespaced Map (Empty)
   (namespaced_map_literal
     namespace: (keyword name: (symbol_name))
     body: (map_literal)))
+
+=========================================
+Namespaced Map (Auto-resolved, Current NS)
+=========================================
+#::{:id 100}
+---
+(source
+  (namespaced_map_literal
+    body: (map_literal
+            (pair
+              key: (keyword name: (symbol_name))
+              value: (number)))))
