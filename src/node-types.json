@@ -247,6 +247,10 @@
           "named": true
         },
         {
+          "type": "invalid_string",
+          "named": true
+        },
+        {
           "type": "invalid_symbol",
           "named": true
         }
@@ -265,6 +269,11 @@
   },
   {
     "type": "invalid_number",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "invalid_string",
     "named": true,
     "fields": {}
   },
@@ -347,6 +356,10 @@
         },
         {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_string",
           "named": true
         },
         {
@@ -648,6 +661,10 @@
           "named": true
         },
         {
+          "type": "invalid_string",
+          "named": true
+        },
+        {
           "type": "invalid_symbol",
           "named": true
         }
@@ -689,6 +706,10 @@
         },
         {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_string",
           "named": true
         },
         {
@@ -952,6 +973,10 @@
         },
         {
           "type": "invalid_number",
+          "named": true
+        },
+        {
+          "type": "invalid_string",
           "named": true
         },
         {

@@ -56,6 +56,7 @@ module.exports = grammar({
       $._visible_form,
       $.invalid_character,
       $.invalid_number,
+      $.invalid_string,
       $.invalid_symbol,
       $.invalid_keyword,
       $.erroneous_symbolic_value
@@ -260,6 +261,7 @@ module.exports = grammar({
 
     invalid_character: $ => $._erroneous_character,
     invalid_number:    $ => $._erroneous_number,
+    invalid_string:    $ => $._erroneous_string,
     invalid_symbol: $ => $._erroneous_symbol,
     invalid_keyword: $ => $._erroneous_keyword,
   }

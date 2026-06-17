@@ -79,6 +79,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "invalid_string"
+        },
+        {
+          "type": "SYMBOL",
           "name": "invalid_symbol"
         },
         {
@@ -1126,6 +1130,10 @@
     "invalid_number": {
       "type": "SYMBOL",
       "name": "_erroneous_number"
+    },
+    "invalid_string": {
+      "type": "SYMBOL",
+      "name": "_erroneous_string"
     },
     "invalid_symbol": {
       "type": "SYMBOL",
