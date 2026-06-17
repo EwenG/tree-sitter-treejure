@@ -83,14 +83,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "invalid_symbol"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "invalid_keyword"
-        },
-        {
-          "type": "SYMBOL",
           "name": "erroneous_symbolic_value"
         }
       ]
@@ -1134,14 +1126,6 @@
     "invalid_string": {
       "type": "SYMBOL",
       "name": "_erroneous_string"
-    },
-    "invalid_symbol": {
-      "type": "SYMBOL",
-      "name": "_erroneous_symbol"
-    },
-    "invalid_keyword": {
-      "type": "SYMBOL",
-      "name": "_erroneous_keyword"
     }
   },
   "extras": [],
@@ -1227,14 +1211,6 @@
     {
       "type": "SYMBOL",
       "name": "_erroneous_character"
-    },
-    {
-      "type": "SYMBOL",
-      "name": "_erroneous_keyword"
-    },
-    {
-      "type": "SYMBOL",
-      "name": "_erroneous_symbol"
     },
     {
       "type": "SYMBOL",

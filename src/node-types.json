@@ -239,19 +239,11 @@
           "named": true
         },
         {
-          "type": "invalid_keyword",
-          "named": true
-        },
-        {
           "type": "invalid_number",
           "named": true
         },
         {
           "type": "invalid_string",
-          "named": true
-        },
-        {
-          "type": "invalid_symbol",
           "named": true
         }
       ]
@@ -263,22 +255,12 @@
     "fields": {}
   },
   {
-    "type": "invalid_keyword",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "invalid_number",
     "named": true,
     "fields": {}
   },
   {
     "type": "invalid_string",
-    "named": true,
-    "fields": {}
-  },
-  {
-    "type": "invalid_symbol",
     "named": true,
     "fields": {}
   },
@@ -351,19 +333,11 @@
           "named": true
         },
         {
-          "type": "invalid_keyword",
-          "named": true
-        },
-        {
           "type": "invalid_number",
           "named": true
         },
         {
           "type": "invalid_string",
-          "named": true
-        },
-        {
-          "type": "invalid_symbol",
           "named": true
         }
       ]
@@ -653,19 +627,11 @@
           "named": true
         },
         {
-          "type": "invalid_keyword",
-          "named": true
-        },
-        {
           "type": "invalid_number",
           "named": true
         },
         {
           "type": "invalid_string",
-          "named": true
-        },
-        {
-          "type": "invalid_symbol",
           "named": true
         }
       ]
@@ -701,19 +667,11 @@
           "named": true
         },
         {
-          "type": "invalid_keyword",
-          "named": true
-        },
-        {
           "type": "invalid_number",
           "named": true
         },
         {
           "type": "invalid_string",
-          "named": true
-        },
-        {
-          "type": "invalid_symbol",
           "named": true
         },
         {
@@ -968,19 +926,11 @@
           "named": true
         },
         {
-          "type": "invalid_keyword",
-          "named": true
-        },
-        {
           "type": "invalid_number",
           "named": true
         },
         {
           "type": "invalid_string",
-          "named": true
-        },
-        {
-          "type": "invalid_symbol",
           "named": true
         }
       ]
