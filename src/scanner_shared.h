@@ -26,11 +26,19 @@ enum TokenType {
 };
 
 static bool is_clojure_whitespace(int32_t c) {
-  return c == ' '  || c == '\t' || c == '\r' || c == '\n' || 
-         c == ','  || c == '\f' || c == '\v' ||
-         c == 0xA0 || c == 0xAD || (c >= 0x2000 && c <= 0x200A) || 
-         c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || 
-         c == 0x3000 || c == 0x1680 || c == 0x180E;
+  // Clojure treats a char as whitespace when Character.isWhitespace(ch) || ch == ','.
+  // Java's isWhitespace covers ASCII controls 0x09-0x0D and 0x1C-0x1F, plus the
+  // Unicode space separators (Zs/Zl/Zp) but EXPLICITLY excludes the non-breaking
+  // spaces U+00A0, U+2007 and U+202F.
+  return c == ' '  || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r' ||
+         c == ',' ||
+         (c >= 0x1C && c <= 0x1F) ||         // file/group/record/unit separators
+         c == 0x1680 ||                      // ogham space mark
+         (c >= 0x2000 && c <= 0x2006) ||     // en quad .. six-per-em space
+         (c >= 0x2008 && c <= 0x200A) ||     // punctuation/thin/hair space (U+2007 excluded)
+         c == 0x2028 || c == 0x2029 ||       // line / paragraph separator
+         c == 0x205F ||                      // medium mathematical space
+         c == 0x3000;                        // ideographic space
 }
 
 /**
