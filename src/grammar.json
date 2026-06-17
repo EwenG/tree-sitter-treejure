@@ -749,8 +749,12 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "SYMBOL",
-            "name": "_unquote_marker"
+            "type": "FIELD",
+            "name": "marker",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_unquote_marker"
+            }
           },
           {
             "type": "REPEAT",

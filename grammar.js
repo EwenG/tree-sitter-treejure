@@ -188,7 +188,7 @@ module.exports = grammar({
     )),
 
     unquote: $ => prec.right(10, seq(
-      $._unquote_marker,
+      field('marker', $._unquote_marker),
       repeat($._gap), 
       field('target', $._visible_form)
     )),
