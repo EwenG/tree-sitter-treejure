@@ -32,6 +32,30 @@ Hexadecimal and Octal
   (number))
 
 ==================
+Signed Hexadecimal
+==================
+-0xFF +0xFF 0xFF -0XAB +0X1a
+---
+(source
+  (number)
+  (number)
+  (number)
+  (number)
+  (number))
+
+==================
+Signed Octal (Invalid Digits)
+==================
+08 -08 +08 0777 -0777
+---
+(source
+  (invalid_number)
+  (invalid_number)
+  (invalid_number)
+  (number)
+  (number))
+
+==================
 Floating Point
 ==================
 3.14 -0.5 1e10 1.2e-5 -5.5E+2 0.
