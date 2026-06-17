@@ -75,17 +75,19 @@ static bool scan_number_word(TSLexer *lexer, int32_t first_char) {
                 }
                 break;
 
-            case NUM_RADIX:
-                if (isalnum(c)) {
-                    int val = get_digit_value(c);
-                    if (val < radix_base) {
-                        has_digits = true; 
-                        consumed = true;
-                    } else {
-                        is_valid = false; // Digit exceeds base
-                    }
+            case NUM_RADIX: {
+                // get_digit_value() only recognizes ASCII [0-9a-zA-Z] and returns
+                // a 100 sentinel otherwise, so it doubles as a locale-independent,
+                // codepoint-safe alphanumeric check (no ctype on raw codepoints).
+                int val = get_digit_value(c);
+                if (val < radix_base) {
+                    has_digits = true;
+                    consumed = true;
+                } else {
+                    is_valid = false; // Digit exceeds base (or non-alphanumeric)
                 }
                 break;
+            }
 
             default: // Decimal or Octal
                 if (is_digit(c)) {

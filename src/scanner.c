@@ -1,8 +1,6 @@
 #include "tree_sitter/parser.h"
 #include "scanner_shared.h"
 #include "numbers.c"
-#include <wctype.h>
-#include <ctype.h>
 #include <string.h>
 
 // ... [scan_character_type function (unchanged)] ...
@@ -27,7 +25,7 @@ static int scan_character_type(TSLexer *lexer) {
       strcmp(buffer, "backspace") == 0 || strcmp(buffer, "return") == 0) return CHARACTER_EXTERNAL;
 
   if (i == 5 && buffer[0] == 'u') {
-    for (int j = 1; j < 5; j++) if (!isxdigit(buffer[j])) return ERRONEOUS_CHARACTER;
+    for (int j = 1; j < 5; j++) if (!is_hex_digit(buffer[j])) return ERRONEOUS_CHARACTER;
     return CHARACTER_EXTERNAL;
   }
   if (buffer[0] == 'o' && i > 1 && i < 5) {
@@ -222,13 +220,13 @@ bool tree_sitter_treejure_external_scanner_scan(void *payload, TSLexer *lexer, c
   // 4. Numbers
   if ((first == '+' || first == '-') && (valid_symbols[NUMBER] || valid_symbols[IDENTIFIER_NAME] || valid_symbols[IDENTIFIER_NAMESPACE])) {
     lexer->advance(lexer, false);
-    if (isdigit(lexer->lookahead)) {
+    if (is_digit(lexer->lookahead)) {
       return scan_number_word(lexer, first);
     }
     return scan_word(lexer, valid_symbols, (char)first);
   }
 
-  if (isdigit(first) && (valid_symbols[NUMBER] || valid_symbols[ERRONEOUS_NUMBER])) {
+  if (is_digit(first) && (valid_symbols[NUMBER] || valid_symbols[ERRONEOUS_NUMBER])) {
     lexer->advance(lexer, false);
     return scan_number_word(lexer, first);
   }
