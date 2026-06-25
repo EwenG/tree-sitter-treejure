@@ -30,3 +30,18 @@
   (let [base (* n 10)]
     #?(:clj  (long base)
        :cljs base)))
+
+;; --- Branch-aware var defs (Tier-1 redefined-var) ------------------------
+;; The var-definition pass honors only this file's dialect branch (`:clj` is
+;; the primary for .cljc), so a var defined once per platform is NOT a
+;; redefinition — but two defs inside the honored branch still collide.
+
+;; Same name in both branches → recorded once (`:clj` only) → NO warning.
+#?(:clj  (def per-platform 1)
+   :cljs (def per-platform 2))
+
+;; Two top-level defs inside the honored `:clj` branch → REDEFINED-VAR on the
+;; second.  (The `:cljs` branch is not scanned for a .cljc file.)
+#?(:clj  (do (def dup-in-branch 1)
+             (def dup-in-branch 2))
+   :cljs (def dup-in-branch 3))
