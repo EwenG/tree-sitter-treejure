@@ -80,6 +80,13 @@
     ([] (self 0))            ; 0-arity calls the 1-arity
     ([x] (* x x))))          ; x used
 
+;; A named fn whose name is NEVER called: the self-name is there only for stack
+;; traces, so it is :local (painted) and NOT warned — unlike an ordinary unused
+;; binding.  (`x` is genuinely unused here → greyed + warned.)
+(def demo-fn-unused-name
+  (fn never-recurs [x]       ; `never-recurs` :local, NOT warned; `x` warned
+    42))
+
 (def demo-fn*
   (fn* [a b unused]          ; `unused` greyed + warned; a,b :local
     (+ a b)))
@@ -94,9 +101,10 @@
 (defn- private-fn [y]        ; y used
   (dec y))
 
-;; defmacro binds its params like defn.  They are used here in plain
-;; list-building so they resolve; using them inside a syntax-quote (`(… ~p))
-;; would NOT count as a usage yet — see the quote-opacity note in scoping.clj.
+;; defmacro binds its params like defn.  They resolve when used in plain
+;; list-building (below) and also when unquoted inside a syntax-quote
+;; (`(… ~p)) — see syntax_quote.clj.  A merely *templated* (un-unquoted)
+;; symbol stays data and does NOT count (see scoping.clj).
 (defmacro twice [body]       ; body used → :local
   (list 'do body body))
 

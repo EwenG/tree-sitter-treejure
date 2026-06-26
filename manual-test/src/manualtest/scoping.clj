@@ -46,9 +46,11 @@
   (let [x 1]                 ; greyed + warned — the body only quotes x
     '(x x x)))
 
-;; syntax-quote behaves the same here (opaque for local resolution).
+;; A syntax-quote with NO unquote is data too: the templated `y`s are not
+;; usages, so `y` is greyed + warned.  (Unquoted `~y` WOULD count — see
+;; syntax_quote.clj.)
 (defn syntax-quoted []
-  (let [y 2]                 ; greyed + warned
+  (let [y 2]                 ; greyed + warned — only templated, never unquoted
     `(y y)))
 
 ;; `#_` discards its next form; the discarded `z` usage does not count, so the

@@ -41,12 +41,20 @@ int plugin_is_GPL_compatible;
 //     `refer-all', `namespace-name-mismatch' and `redefined-var' diagnostics
 //     (Tier 1); the NsIndex seeds the cross-file require graph + resolution next;
 //   * `treejure-semantic-faces' (flat [s e cat ...] read of the face map) and
-//     `treejure-close-buffer'.
+//     `treejure-close-buffer';
+//   * **navigation** -- the scope pass records `NavRef' occurrences (local
+//     bindings + their usages by `local_id'; same-ns var defs + their in-file
+//     usages by name); `treejure-definition' / `treejure-references' answer a
+//     point query by resolved identity (shadowing-correct).  `treejure-definition'
+//     also resolves **cross-namespace** targets (slice 4b): an aliased/qualified
+//     or `:refer'-ed var -> its def in the dependency `resolve_ns' finds over the
+//     classpath (see resolve_cross_ns), read lazily at the query.
 //
-// The cross-file index (NsIndex/require graph/jars) and the `:global-var' /
-// `:unresolved' faces it enables are deliberately NOT here -- they need the
-// dependency closure and would be false-positive-prone buffer-locally.  They
-// are the next slice (PLAN build-order step 4).  All positions are 0-based byte
+// The cross-file *lints/faces* -- the `:global-var' / `:unresolved' faces and
+// the Tier-2 diagnostics (undefined var, unused require, …) -- are deliberately
+// NOT here: unlike a point query they need exhaustive (jar-inclusive) knowledge,
+// else they false-positive.  They, jar reading, and project-wide find-usages are
+// later slices (PLAN build-order step 4+).  All positions are 0-based byte
 // offsets; Elisp converts to buffer positions on apply.
 // ---------------------------------------------------------------------------
 
@@ -127,7 +135,23 @@ typedef struct {
     uint32_t start, end; // byte span of the binding occurrence (for the face)
     int used;
     int underscore;      // name begins with '_' -> intentionally ignored
+    int local_id;        // groups a binding with its usages (navigation)
 } Local;
+
+// A navigation occurrence: a resolved symbol (a local binding/usage, or a
+// same-namespace var def/usage) recorded so jump-to-definition and find-
+// references can answer a point query.  Locals group by `local_id' (one id per
+// binding, shared by its usages); vars group by `name'.  Cross-namespace
+// targets are NOT recorded here -- they resolve through the cross-file index
+// (next slice); a point on one yields no NavRef and the query returns nil.
+enum { NAV_LOCAL, NAV_VAR };
+typedef struct {
+    uint32_t start, end;  // the symbol occurrence's byte span (jump target)
+    int      kind;        // NAV_LOCAL | NAV_VAR
+    int      local_id;    // NAV_LOCAL grouping (-1 for vars)
+    char    *name;        // NAV_VAR grouping (malloc'd; NULL for locals)
+    int      is_def;      // 1 = binding/def site, 0 = usage
+} NavRef;
 
 // One flattened require/use spec: the resolved namespace plus the location of
 // its lib symbol (for diagnostics), and whether it refers everything.
@@ -147,14 +171,24 @@ typedef struct {
     int      private;          // defn- / ^:private / ^{:private true}
 } VarDef;
 
+// An alias -> namespace mapping (`[lib :as a]` / `:as-alias`) and a referred
+// var -> namespace mapping (`[lib :refer [foo]]`, or `:use ... :only [foo]`).
+// Both feed cross-namespace resolution: a qualified `a/foo` resolves `a` to its
+// ns, a bare referred `foo` resolves to the ns that referred it.
+typedef struct { char *alias; char *ns; } AliasEntry;
+typedef struct { char *name;  char *ns; } ReferEntry;
+
 // The distilled namespace surface of a file: its ns name, the flattened
-// requires, and the vars it defines.  Recomputed on each check for the active
-// buffer; the seed of PLAN's NsIndex (aliases/refers/arities arrive later).
+// requires, the aliases/refers it brings into scope, and the vars it defines.
+// Recomputed on each check for the active buffer; the seed of PLAN's NsIndex
+// (arities arrive later).
 typedef struct {
     char    *ns_name;           // the file's namespace (malloc'd), or NULL
     uint32_t ns_start, ns_end;  // the ns-name symbol's span
     ReqSpec *requires; size_t n_requires, cap_requires;
     VarDef  *vars;     size_t n_vars, cap_vars;
+    AliasEntry *aliases; size_t n_aliases, cap_aliases;
+    ReferEntry *refers;  size_t n_refers,  cap_refers;
 } NsIndex;
 
 // ===========================================================================
@@ -180,6 +214,8 @@ typedef struct {
     size_t        nspans, cap_spans;
     Diagnostic   *diags; // recomputed each check
     size_t        ndiags, cap_diags;
+    NavRef       *navs;  // navigation occurrences (locals + same-ns vars)
+    size_t        nnavs, cap_navs;
 } FileNode;
 
 // ===========================================================================
@@ -210,12 +246,22 @@ static void nsindex_clear(NsIndex *ix) {
     ix->n_requires = 0;
     for (size_t i = 0; i < ix->n_vars; i++) free(ix->vars[i].name);
     ix->n_vars = 0;
+    for (size_t i = 0; i < ix->n_aliases; i++) {
+        free(ix->aliases[i].alias); free(ix->aliases[i].ns);
+    }
+    ix->n_aliases = 0;
+    for (size_t i = 0; i < ix->n_refers; i++) {
+        free(ix->refers[i].name); free(ix->refers[i].ns);
+    }
+    ix->n_refers = 0;
 }
 
 static void filenode_clear_outputs(FileNode *f) {
     for (size_t i = 0; i < f->ndiags; i++) free(f->diags[i].message);
     f->ndiags = 0;
     f->nspans = 0;
+    for (size_t i = 0; i < f->nnavs; i++) free(f->navs[i].name);
+    f->nnavs = 0;
     nsindex_clear(&f->index);
 }
 
@@ -225,8 +271,11 @@ static void filenode_free(FileNode *f) {
     if (f->tree) ts_tree_delete(f->tree);
     free(f->index.requires);
     free(f->index.vars);
+    free(f->index.aliases);
+    free(f->index.refers);
     free(f->spans);
     free(f->diags);
+    free(f->navs);
     free(f->text);
     free(f->path);
     free(f);
@@ -403,7 +452,21 @@ typedef struct {
     FileNode  *f;
     const char *text;
     Local     *locals; size_t nlocals, cap_locals;
+    int        next_local_id;   // monotonic per file, assigned at each binding
 } Analyzer;
+
+// Record a navigation occurrence.  NAME is duplicated for vars (NULL for
+// locals).  The whole-symbol span is the jump target / highlight region.
+static void push_nav(FileNode *f, uint32_t start, uint32_t end, int kind,
+                     int local_id, const char *name, size_t name_len, int is_def) {
+    if (f->nnavs == f->cap_navs) {
+        f->cap_navs = f->cap_navs ? f->cap_navs * 2 : 64;
+        f->navs = realloc(f->navs, f->cap_navs * sizeof(NavRef));
+    }
+    char *dup = NULL;
+    if (name) { dup = malloc(name_len + 1); memcpy(dup, name, name_len); dup[name_len] = '\0'; }
+    f->navs[f->nnavs++] = (NavRef){ start, end, kind, local_id, dup, is_def };
+}
 
 static void push_span(FileNode *f, uint32_t start, uint32_t end, int cat) {
     if (start >= end) return;
@@ -434,11 +497,14 @@ static void push_local(Analyzer *a, TSNode sym) {
     }
     const char *name = a->text + na;
     size_t name_len = nb - na;
+    int id = a->next_local_id++;
     a->locals[a->nlocals++] = (Local){
         .name = name, .name_len = name_len,
         .start = a0, .end = b0, .used = 0,
-        .underscore = (name_len >= 1 && name[0] == '_')
+        .underscore = (name_len >= 1 && name[0] == '_'),
+        .local_id = id
     };
+    push_nav(a->f, a0, b0, NAV_LOCAL, id, NULL, 0, 1);   // the binding site
 }
 
 // Close the scope frame opened at MARK: emit each binding's face (greyed when
@@ -470,21 +536,35 @@ static void resolve_ref(Analyzer *a, TSNode sym) {
     uint32_t na = ts_node_start_byte(nm), nb = ts_node_end_byte(nm);
     size_t len = nb - na;
     const char *name = a->text + na;
+    uint32_t ss = ts_node_start_byte(sym), se = ts_node_end_byte(sym);
     for (size_t i = a->nlocals; i-- > 0; ) {
         Local *l = &a->locals[i];
         if (l->name_len == len && memcmp(l->name, name, len) == 0) {
             l->used = 1;
-            push_span(a->f, ts_node_start_byte(sym), ts_node_end_byte(sym), CAT_LOCAL);
+            push_span(a->f, ss, se, CAT_LOCAL);
+            push_nav(a->f, ss, se, NAV_LOCAL, l->local_id, NULL, 0, 0);
             return;
         }
     }
-    // Not a local: current-ns var / referred / core / unresolved -- left to the
-    // cross-file tier (treesit already faces builtins/def-names meanwhile).
+    // Not a local.  If it names a var defined in this file, record an intra-file
+    // var usage (jump-to-def / find-references); otherwise it is a referred /
+    // core / unresolved symbol left to the cross-file tier (treesit already
+    // faces builtins/def-names meanwhile).  Same-namespace `:global-var' faces
+    // are deferred to the cross-file slice, which owns them holistically.
+    NsIndex *ix = &a->f->index;
+    for (size_t v = 0; v < ix->n_vars; v++) {
+        if (strlen(ix->vars[v].name) == len &&
+            memcmp(ix->vars[v].name, name, len) == 0) {
+            push_nav(a->f, ss, se, NAV_VAR, -1, name, len, 0);
+            return;
+        }
+    }
 }
 
 // Forward declarations for the mutually-recursive walk.
 static void analyze_node(Analyzer *a, TSNode node);
 static void bind_pattern(Analyzer *a, TSNode pat);
+static void scan_syntax_quote(Analyzer *a, TSNode node, int level);
 static TSNode reader_conditional_branch(const char *text, const char *path, TSNode node);
 
 // Bind every symbol introduced by a destructuring pattern.
@@ -537,7 +617,18 @@ static void bind_pattern(Analyzer *a, TSNode pat) {
                 } else if (kw_name_eq(a->text, key, "as")) {
                     bind_pattern(a, val);
                 } else if (kw_name_eq(a->text, key, "or")) {
-                    analyze_node(a, val);   // defaults are expressions
+                    // `:or {sym default ...}': only the default *values* are
+                    // expressions; the keys are the binding names being
+                    // defaulted, not usages -- so don't resolve them.
+                    TSNode m = unwrap_meta(val);
+                    if (!ts_node_is_null(m) && type_is(m, "map_literal")) {
+                        uint32_t mc = ts_node_named_child_count(m);
+                        for (uint32_t j = 0; j < mc; j++) {
+                            TSNode pr = ts_node_named_child(m, j);
+                            if (type_is(pr, "pair"))
+                                analyze_node(a, ts_node_child_by_field_name(pr, "value", 5));
+                        }
+                    }
                 }
                 // other namespaced/keyword directives: ignore
             } else {
@@ -655,6 +746,12 @@ static const char *const DEF_FORMS[]  = { "def", "defonce", 0 };
 static int analyze_binding_form(Analyzer *a, TSNode list, TSNode head) {
     const char *text = a->text;
 
+    if (sym_name_eq(text, head, "ns")) {
+        // The `(ns ...)' form is distilled by analyze_requires; its require
+        // specs are data (lib names, aliases), not value references -- so the
+        // scope pass treats the whole form as opaque (matching scan_var_defs).
+        return 1;
+    }
     if (name_in(text, head, LET_FORMS) || name_in(text, head, SEQ_FORMS)) {
         int mods = name_in(text, head, SEQ_FORMS);
         size_t mark = a->nlocals;
@@ -669,6 +766,9 @@ static int analyze_binding_form(Analyzer *a, TSNode list, TSNode head) {
         uint32_t idx = 1;
         if (!ts_node_is_null(after) && type_is(unwrap_meta(after), "symbol")) {
             push_local(a, unwrap_meta(after));   // self-name visible in body
+            // A named fn need not call itself (the name is often there only for
+            // stack traces), so never report it unused -- mark it used up front.
+            a->locals[a->nlocals - 1].used = 1;
             idx = 2;
         }
         analyze_fn_tail(a, list, idx);
@@ -750,6 +850,36 @@ static int analyze_binding_form(Analyzer *a, TSNode list, TSNode head) {
     return 0;
 }
 
+// Within a syntax-quoted template only the `unquote' (~) and `unquote_splicing'
+// (~@) targets are evaluated code -- the rest is data (templated,
+// namespace-qualified symbols).  Nested `syntax_quote's raise the quoting
+// level; an unquote cancels one level and only "escapes" to live code when the
+// level returns to 0.  Walk the template tracking that level and hand the
+// escaping targets to the normal resolver, so a local used only under a
+// backtick is still seen as used.
+static void scan_syntax_quote(Analyzer *a, TSNode node, int level) {
+    if (ts_node_is_null(node)) return;
+    const char *t = ts_node_type(node);
+    if (strcmp(t, "syntax_quote") == 0) {
+        scan_syntax_quote(a, ts_node_child_by_field_name(node, "target", 6), level + 1);
+        return;
+    }
+    if (strcmp(t, "unquote") == 0 || strcmp(t, "unquote_splicing") == 0) {
+        TSNode target = ts_node_child_by_field_name(node, "target", 6);
+        if (level <= 1) analyze_node(a, target);          // escapes to live code
+        else scan_syntax_quote(a, target, level - 1);     // still templated
+        return;
+    }
+    // An inner plain quote / var-quote / discard / eval-literal stays data.
+    if (strcmp(t, "quote") == 0 || strcmp(t, "var_quote") == 0 ||
+        strcmp(t, "discard") == 0 || strcmp(t, "eval_literal") == 0)
+        return;
+    // Otherwise keep descending -- a deeper unquote may live inside.
+    uint32_t cnt = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < cnt; i++)
+        scan_syntax_quote(a, ts_node_named_child(node, i), level);
+}
+
 // Generic recursive walk.
 static void analyze_node(Analyzer *a, TSNode node) {
     if (ts_node_is_null(node)) return;
@@ -760,9 +890,14 @@ static void analyze_node(Analyzer *a, TSNode node) {
         analyze_node(a, ts_node_child_by_field_name(node, "target", 6));
         return;
     }
-    // Quoted / discarded / eval-literal subtrees are data, not code -- opaque
-    // for local resolution (syntax-quote unquoting is a later refinement).
-    if (strcmp(t, "quote") == 0 || strcmp(t, "syntax_quote") == 0 ||
+    // A syntax-quoted template is data, EXCEPT the ~ / ~@ forms inside it, whose
+    // targets are live code -- analyze just those (see scan_syntax_quote).
+    if (strcmp(t, "syntax_quote") == 0) {
+        scan_syntax_quote(a, ts_node_child_by_field_name(node, "target", 6), 1);
+        return;
+    }
+    // Plain quoted / discarded / eval-literal subtrees are pure data.
+    if (strcmp(t, "quote") == 0 ||
         strcmp(t, "var_quote") == 0 || strcmp(t, "discard") == 0 ||
         strcmp(t, "eval_literal") == 0)
         return;
@@ -893,6 +1028,25 @@ static void push_var(NsIndex *ix, char *name, uint32_t ns, uint32_t ne,
     ix->vars[ix->n_vars++] = (VarDef){ name, ns, ne, ds, de, private };
 }
 
+// Record an alias / referred-var mapping (both args are duplicated).
+static void push_alias(NsIndex *ix, const char *text, TSNode sym, const char *ns) {
+    if (ix->n_aliases == ix->cap_aliases) {
+        ix->cap_aliases = ix->cap_aliases ? ix->cap_aliases * 2 : 8;
+        ix->aliases = realloc(ix->aliases, ix->cap_aliases * sizeof(AliasEntry));
+    }
+    ix->aliases[ix->n_aliases++] =
+        (AliasEntry){ node_text_dup(text, sym), strdup(ns) };
+}
+
+static void push_refer(NsIndex *ix, const char *text, TSNode sym, const char *ns) {
+    if (ix->n_refers == ix->cap_refers) {
+        ix->cap_refers = ix->cap_refers ? ix->cap_refers * 2 : 16;
+        ix->refers = realloc(ix->refers, ix->cap_refers * sizeof(ReferEntry));
+    }
+    ix->refers[ix->n_refers++] =
+        (ReferEntry){ node_text_dup(text, sym), strdup(ns) };
+}
+
 // Parse one lib spec (symbol | vector | prefix-list) into IX.  PREFIX is the
 // enclosing prefix-list parent (or NULL); FROM_USE marks a `:use` clause, whose
 // specs refer everything unless narrowed by `:only`/`:refer`.
@@ -916,14 +1070,29 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
         while (!ts_node_is_null(opt = nth_form(spec, k))) {
             TSNode ou = unwrap_meta(opt);
             if (type_is(ou, "keyword")) {
-                if (kw_name_eq(text, ou, "refer")) {
-                    TSNode v = unwrap_meta(nth_form(spec, k + 1));
-                    refer_all = (!ts_node_is_null(v) && type_is(v, "keyword")
-                                 && kw_name_eq(text, v, "all"));
+                if (kw_name_eq(text, ou, "as") || kw_name_eq(text, ou, "as-alias")) {
+                    TSNode al = unwrap_meta(nth_form(spec, k + 1));
+                    if (!ts_node_is_null(al) && type_is(al, "symbol"))
+                        push_alias(ix, text, al, ns);
                     k += 2; continue;
                 }
-                if (kw_name_eq(text, ou, "only")) { refer_all = 0; k += 2; continue; }
-                k += 2; continue;   // :as / :as-alias / :rename / ... + value
+                if (kw_name_eq(text, ou, "refer") || kw_name_eq(text, ou, "only")) {
+                    TSNode v = unwrap_meta(nth_form(spec, k + 1));
+                    if (kw_name_eq(text, ou, "refer") && !ts_node_is_null(v) &&
+                        type_is(v, "keyword") && kw_name_eq(text, v, "all")) {
+                        refer_all = 1;
+                    } else if (!ts_node_is_null(v) && type_is(v, "vector_literal")) {
+                        refer_all = 0;
+                        uint32_t r = 0; TSNode rs;     // referred var names
+                        while (!ts_node_is_null(rs = nth_form(v, r))) {
+                            TSNode ru = unwrap_meta(rs);
+                            if (type_is(ru, "symbol")) push_refer(ix, text, ru, ns);
+                            r++;
+                        }
+                    }
+                    k += 2; continue;
+                }
+                k += 2; continue;   // :rename / other directive + value
             }
             k++;
         }
@@ -1089,9 +1258,13 @@ static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head)
     if (ts_node_is_null(name) || !type_is(name, "symbol")) return;
     TSNode nm = field_name_node(name);
     if (ts_node_is_null(nm)) return;
-    push_var(&f->index, node_text_dup(text, nm),
-             ts_node_start_byte(name), ts_node_end_byte(name),
+    uint32_t ns = ts_node_start_byte(name), ne = ts_node_end_byte(name);
+    push_var(&f->index, node_text_dup(text, nm), ns, ne,
              ts_node_start_byte(u), ts_node_end_byte(u), private);
+    // The def site, for find-references on the var (its usages are recorded by
+    // the scope pass).  Keyed by name -- a redefinition adds a second def nav.
+    uint32_t na = ts_node_start_byte(nm), nb = ts_node_end_byte(nm);
+    push_nav(f, ns, ne, NAV_VAR, -1, text + na, nb - na, 1);
 }
 
 // The reader-conditional feature keyword honored for PATH's dialect.  `.cljc`
@@ -1241,9 +1414,11 @@ static int span_cmp(const void *x, const void *y) {
 // the already-known workspace files, or a user-picked directory) and hands the
 // directory list to `resolve_ns'; nothing about that choice is persisted.
 //
-// These are the primitives the cross-file lints/faces/commands build on; their
-// first consumer (var resolution / find-usages) lands in a later slice.  Until
-// then they have no caller -- kept deliberately as the resolution foundation.
+// First consumer: cross-namespace `treejure-definition' (see resolve_cross_ns)
+// resolves an aliased/qualified or `:refer'-ed var to its defining file via
+// `resolve_ns' over the workspace classpath (directory entries; jars land in a
+// later slice).  Cross-file lints/faces and find-usages build on the same
+// primitives next.
 // ===========================================================================
 
 // The set of platforms a file participates in, as a bitmask.  `.cljc' counts as
@@ -1316,8 +1491,13 @@ static void index_disk_file(Workspace *ws, const char *path, time_t mtime) {
     if (!buf) return;
     if (!f) f = ws_intern_file(ws, path);
     filenode_reparse(ws, f, buf, len);   // takes ownership of `buf`
-    filenode_clear_outputs(f);           // keep only the ns name (set next)
+    filenode_clear_outputs(f);
+    // Distil the dependency's surface: ns name + defined vars (what cross-ns
+    // resolution looks up).  No requires/aliases/refers/diagnostics -- a dep is
+    // queried for the vars it *defines*, not what it brings into scope; those are
+    // recomputed by analyze_file if it ever becomes the live buffer.
     extract_ns_name(f);
+    extract_var_defs(f, f->text, ts_tree_root_node(f->tree));
     f->indexed_mtime = mtime;
 }
 
@@ -1376,7 +1556,8 @@ static void analyze_file(Workspace *ws, FileNode *f) {
     lint_redefined_var(f);
 
     Analyzer a = { .ws = ws, .f = f, .text = f->text,
-                   .locals = NULL, .nlocals = 0, .cap_locals = 0 };
+                   .locals = NULL, .nlocals = 0, .cap_locals = 0,
+                   .next_local_id = 0 };
     analyze_body(&a, root, 0);   // top level: every form is a reference context
     free(a.locals);
 
@@ -1522,6 +1703,153 @@ static emacs_value f_semantic_faces(emacs_env *env, ptrdiff_t nargs, emacs_value
     return res;
 }
 
+// The navigation occurrence covering BYTE (symbol spans never overlap).
+static NavRef *nav_at(FileNode *f, uint32_t byte) {
+    for (size_t i = 0; i < f->nnavs; i++)
+        if (f->navs[i].start <= byte && byte < f->navs[i].end) return &f->navs[i];
+    return NULL;
+}
+
+// (:file PATH :beg B :end E) location plist (encoding "A").
+static emacs_value location_to_lisp(emacs_env *env, FileNode *f,
+                                    uint32_t beg, uint32_t end) {
+    emacs_value pl[] = {
+        env->intern(env, ":file"),
+        env->make_string(env, f->path, (ptrdiff_t)strlen(f->path)),
+        env->intern(env, ":beg"), env->make_integer(env, beg),
+        env->intern(env, ":end"), env->make_integer(env, end)
+    };
+    return env->funcall(env, env->intern(env, "list"), 6, pl);
+}
+
+// The innermost `symbol' node covering BYTE, or a null node.
+static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
+    TSNode root = ts_tree_root_node(f->tree);
+    TSNode n = ts_node_descendant_for_byte_range(root, byte, byte);
+    while (!ts_node_is_null(n) && !type_is(n, "symbol")) n = ts_node_parent(n);
+    return n;
+}
+
+// Resolve the cross-namespace var named by SYM -- a qualified `alias/name' (or
+// fully-qualified `the.ns/name') or a bare `:refer'-ed `name' -- against F's
+// aliases/refers and WS's classpath (directory entries; jars resolve in a later
+// slice).  Returns its def-site location plist in the defining file, or nil.
+// Reads the dependency lazily (resolve_ns), exactly at this point query.
+static emacs_value resolve_cross_ns(emacs_env *env, Workspace *ws,
+                                    FileNode *f, TSNode sym) {
+    TSNode nmf = field_name_node(sym);
+    if (ts_node_is_null(nmf)) return Qnil(env);
+    uint32_t na = ts_node_start_byte(nmf), nb = ts_node_end_byte(nmf);
+    size_t nlen = nb - na;
+    const char *nm = f->text + na;
+    NsIndex *ix = &f->index;
+
+    const char *target_ns = NULL;
+    char litbuf[1024];
+    TSNode nsf = ts_node_child_by_field_name(sym, "namespace", 9);
+    if (!ts_node_is_null(nsf)) {                       // qualified: alias or fqn
+        uint32_t aa = ts_node_start_byte(nsf), ab = ts_node_end_byte(nsf);
+        size_t alen = ab - aa;
+        const char *al = f->text + aa;
+        for (size_t i = 0; i < ix->n_aliases && !target_ns; i++)
+            if (strlen(ix->aliases[i].alias) == alen &&
+                memcmp(ix->aliases[i].alias, al, alen) == 0)
+                target_ns = ix->aliases[i].ns;
+        if (!target_ns) {                              // not an alias -> literal ns
+            if (alen >= sizeof litbuf) return Qnil(env);
+            memcpy(litbuf, al, alen);
+            litbuf[alen] = '\0';
+            target_ns = litbuf;
+        }
+    } else {                                           // bare: a referred var
+        for (size_t i = 0; i < ix->n_refers && !target_ns; i++)
+            if (strlen(ix->refers[i].name) == nlen &&
+                memcmp(ix->refers[i].name, nm, nlen) == 0)
+                target_ns = ix->refers[i].ns;
+        if (!target_ns) return Qnil(env);              // same-ns/core/unresolved
+    }
+
+    FileNode *dep = resolve_ns(ws, (const char *const *)ws->classpath,
+                               ws->n_classpath, target_ns,
+                               dialect_mask(f->path), f->path);
+    if (!dep) return Qnil(env);
+    for (size_t v = 0; v < dep->index.n_vars; v++)
+        if (strlen(dep->index.vars[v].name) == nlen &&
+            memcmp(dep->index.vars[v].name, nm, nlen) == 0)
+            return location_to_lisp(env, dep, dep->index.vars[v].name_start,
+                                    dep->index.vars[v].name_end);
+    return Qnil(env);
+}
+
+// (treejure-definition WS FILE BYTE) -> (:file f :beg b :end e) or nil.
+// In-file first (cached analysis): a local usage -> its binding; a same-ns var
+// usage -> its definition.  Otherwise cross-namespace: an aliased/qualified or
+// `:refer'-ed var -> its def in the resolved dependency (lazy, via the
+// classpath).  A core/unresolved/jar-backed target yields nil.
+static emacs_value f_definition(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
+    Workspace *ws = env->get_user_ptr(env, args[0]);
+    if (!ws) return Qnil(env);
+    size_t plen; char *path = copy_lisp_string(env, args[1], &plen);
+    if (!path) return Qnil(env);
+    FileNode *f = ws_find_file(ws, path);
+    free(path);
+    if (!f || !f->tree) return Qnil(env);
+
+    uint32_t byte = (uint32_t)env->extract_integer(env, args[2]);
+    NavRef *r = nav_at(f, byte);
+    if (r && r->kind == NAV_LOCAL) {
+        for (size_t i = 0; i < f->nnavs; i++) {
+            NavRef *n = &f->navs[i];
+            if (n->kind == NAV_LOCAL && n->is_def && n->local_id == r->local_id)
+                return location_to_lisp(env, f, n->start, n->end);
+        }
+    } else if (r && r->name) {
+        for (size_t v = 0; v < f->index.n_vars; v++)   // first def with this name
+            if (strcmp(f->index.vars[v].name, r->name) == 0)
+                return location_to_lisp(env, f, f->index.vars[v].name_start,
+                                        f->index.vars[v].name_end);
+    }
+    // Not an in-file local/var: try cross-namespace resolution.
+    TSNode sym = symbol_at_byte(f, byte);
+    if (ts_node_is_null(sym)) return Qnil(env);
+    return resolve_cross_ns(env, ws, f, sym);
+}
+
+// (treejure-references WS FILE BYTE &optional SCOPE-DIRS) -> list of locations.
+// Every occurrence (definition + usages) of the local or same-namespace var at
+// BYTE: locals are buffer-scoped by binding id; vars are matched by name.
+// SCOPE-DIRS (the per-call cross-file search scope) is accepted for forward
+// compatibility but not yet consulted -- var references are currently buffer-
+// scoped; the cross-file scan lands in a later slice.
+static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
+    Workspace *ws = env->get_user_ptr(env, args[0]);
+    if (!ws) return Qnil(env);
+    size_t plen; char *path = copy_lisp_string(env, args[1], &plen);
+    if (!path) return Qnil(env);
+    FileNode *f = ws_find_file(ws, path);
+    free(path);
+    if (!f) return Qnil(env);
+
+    uint32_t byte = (uint32_t)env->extract_integer(env, args[2]);
+    NavRef *r = nav_at(f, byte);
+    if (!r || f->nnavs == 0) return Qnil(env);
+
+    emacs_value *items = malloc(f->nnavs * sizeof(emacs_value));
+    size_t k = 0;
+    for (size_t i = 0; i < f->nnavs; i++) {
+        NavRef *n = &f->navs[i];
+        int match = (r->kind == NAV_LOCAL)
+            ? (n->kind == NAV_LOCAL && n->local_id == r->local_id)
+            : (n->kind == NAV_VAR && n->name && r->name &&
+               strcmp(n->name, r->name) == 0);
+        if (match) items[k++] = location_to_lisp(env, f, n->start, n->end);
+    }
+    emacs_value res = (k == 0) ? Qnil(env)
+        : env->funcall(env, env->intern(env, "list"), (ptrdiff_t)k, items);
+    free(items);
+    return res;
+}
+
 // (treejure-close-buffer WS FILE) -> nil.  Revert the file to disk-backed,
 // dropping its transient live tree/text (the node is kept for the session).
 static emacs_value f_close_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
@@ -1575,6 +1903,8 @@ int emacs_module_init(struct emacs_runtime *ert) {
     bind_fn(env, "treejure-init",            1, 2, f_init);
     bind_fn(env, "treejure-check-buffer",    4, 4, f_check_buffer);
     bind_fn(env, "treejure-semantic-faces",  4, 4, f_semantic_faces);
+    bind_fn(env, "treejure-definition",      3, 3, f_definition);
+    bind_fn(env, "treejure-references",      3, 4, f_references);
     bind_fn(env, "treejure-close-buffer",    2, 2, f_close_buffer);
     bind_fn(env, "treejure-set-def-forms",   2, 2, f_set_def_forms);
     bind_fn(env, "treejure-category-names",  0, 0, f_category_names);

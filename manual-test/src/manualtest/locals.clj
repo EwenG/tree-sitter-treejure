@@ -44,3 +44,5 @@
   (let [_result (println "side effect")
         n       42]
     n))
+
+(handler)

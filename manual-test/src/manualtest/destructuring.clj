@@ -43,6 +43,13 @@
 (defn assoc-as-or [{:keys [size] :or {size fallback} :as opts}]
   [size opts])               ; size, opts used; fallback referenced in :or
 
+;; The `:or` KEY is the binding name being defaulted, NOT a usage of it.  Here
+;; `limit` is bound but never used in the body, so it is greyed + warned even
+;; though it appears as the `:or` key — while the default value `fallback` is a
+;; real reference (used).
+(defn assoc-or-key-unused [{:keys [limit] :or {limit fallback}}]
+  :ignored)                  ; `limit` unused → greyed + warned; fallback used
+
 ;; Arbitrary `{binding lookup-key}` pairs: the KEY is the binding pattern, the
 ;; value is the lookup key.  `the-name` is bound + used.
 (defn assoc-explicit [{the-name :name}]
