@@ -9,6 +9,12 @@ Things to watch:
     face): a resolved local binding **and every usage of it**.
   - `:local-unused` → `replique-clojure-unused-face` (defaults to `shadow`,
     i.e. greyed out): a local binding that is never used in its scope.
+  - `:global-var` → `font-lock-variable-name-face` (default): a var **usage**
+    that positively resolves — a **same-namespace** def (painted immediately,
+    after-edit) or, on the **full tier** (save / buffer-switch / `M-.`), a
+    **cross-namespace** usage (aliased/qualified or `:refer`-ed) resolved via a
+    project source dir. A core / library / jar-backed symbol gets **no** face —
+    not a false report, just not resolved yet (same boundary as jump-to-def).
 - **Flymake diagnostics** (underlines; `M-x flymake-show-buffer-diagnostics`):
   - `unused-binding` warnings (one per greyed binding, except `_`-names).
   - `duplicate-require`, `refer-all`, `namespace-name-mismatch` warnings from
@@ -32,10 +38,10 @@ Things to watch:
     **buffer-scoped** for now (project-wide find-usages is a later slice).
 
 What the module does **not** do yet (so don't expect it): cross-file
-*diagnostics* or *faces* — `:global-var` / `:unresolved`, undefined-var, unused
-require, arity checks — and **jar-backed** resolution (so `clojure.core` and
-library namespaces don't resolve), and project-wide find-usages. Those need the
-rest of the cross-file workspace tier (PLAN step 4+).
+*diagnostics* — undefined-var, unused require, arity checks — and the
+`:unresolved` *face*; **jar-backed** resolution (so `clojure.core` and library
+namespaces neither resolve nor get a `:global-var` face), and project-wide
+find-usages. Those need the rest of the cross-file workspace tier (PLAN step 4+).
 
 ## Files
 
@@ -53,7 +59,8 @@ rest of the cross-file workspace tier (PLAN step 4+).
 | `src/manualtest/extra_def_forms.clj` | user macros analysed like `defn` (see `.dir-locals.el`) |
 | `src/manualtest/cljs_demo.cljs`     | ClojureScript buffer (same local analysis) |
 | `src/manualtest/reader_conditionals.cljc` | `.cljc` reader conditionals; branch-aware var defs (`:clj` honored) |
-| `src/manualtest/navigation.clj`     | `xref` `M-.` / `M-?`: locals, same-ns vars, and cross-file (aliased/qualified/`:refer`-ed) jump-to-def |
+| `src/manualtest/global_vars.clj`    | `:global-var` faces: same-ns (fast tier) + cross-ns (full tier) resolved usages; shadowing → `:local`; core/jar/unresolved → no face |
+| `src/manualtest/navigation.clj`     | `xref` `M-.` / `M-?`: locals, same-ns vars, cross-file (aliased/qualified/`:refer`-ed) jump-to-def; **and `:global-var` faces** on the resolved same-ns + cross-ns usages |
 | `src/manualtest/nav_target.clj`     | the cross-file jump **target** for `navigation.clj` (open only to confirm jumps arrive) |
 
 `.dir-locals.el` sets `replique-clojure-extra-def-forms` to `("defroute"
