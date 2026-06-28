@@ -24,3 +24,10 @@
 ;; Used here so it is not merely an unused private var.
 (defn squared-plus-one [x]
   (+ 1 (secret-helper x)))
+
+;; Multimethods extended cross-namespace from `defmethods.clj' (which requires
+;; this ns aliased + `:refer'-ed only to use these as `defmethod' targets).
+;; `M-.' on `nt/area' / the referred `shape-name' over there lands on these.
+(defmulti area :kind)
+
+(defmulti shape-name :kind)

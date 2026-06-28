@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "jar_reader.h"   // read_jar_entry: the vendored-miniz jar window
+
 // This tells C about the generated grammar function in parser.c.
 extern const TSLanguage *tree_sitter_treejure();
 
@@ -58,13 +60,29 @@ int plugin_is_GPL_compatible;
 // confirmed resolutions are painted.  The full tier also emits the
 // `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires)
 // -- buffer-determinable from the require pass's alias/refer maps + the scope
-// pass's usage marking, so they read no dependencies (clj-kondo parity).  What
-// is still deferred needs exhaustive (jar-inclusive) knowledge, else it
-// false-positives: the `:unresolved' face and the dependency-reading Tier-2
-// *warning* diagnostics (undefined var, unresolved-namespace, …).  They, jar
-// reading, and project-wide find-usages are later slices (PLAN build-order
-// step 4+).  All positions are 0-based byte offsets; Elisp converts to buffer
-// positions on apply.
+// pass's usage marking, so they read no dependencies (clj-kondo parity).
+//
+// The head of every list form is also classified, buffer-only: a special form
+// or core macro gets `:special-form', and a *known* non-core macro (a
+// user-declared def-form via `treejure-set-def-forms') gets `:macro-invocation'
+// -- the hue treesit cannot assign, since the grammar can't tell a macro call
+// from a function call.  An unknown head is left unclaimed (it may be an
+// ordinary function); broader macro knowledge (`:lint-as', library macros)
+// arrives later.  The CORE_FORMS set is kept in sync with the syntax layer.
+//
+// Cross-namespace resolution now reaches **jars** (the jar slice): `resolve_ns'
+// probes jar classpath entries via the vendored miniz reader (read_jar_entry,
+// in jar_reader.c), so an aliased/qualified/`:refer'-ed usage of a library or
+// `clojure.core' var gets the `:global-var' face once that jar is on the
+// classpath -- a jar entry is parsed and distilled once and cached as an
+// immutable FileNode.  (Jump-to-def *into* a jar entry still lands nowhere --
+// gracefully -- pending Elisp that opens the entry.)
+//
+// What is still deferred needs exhaustive knowledge of the whole closure, else
+// it false-positives: the `:unresolved' face and the dependency-reading Tier-2
+// *warning* diagnostics (undefined var, unresolved-namespace, …), and project-
+// wide find-usages -- later slices (PLAN build-order step 4+/5).  All positions
+// are 0-based byte offsets; Elisp converts to buffer positions on apply.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================
@@ -77,17 +95,19 @@ int plugin_is_GPL_compatible;
 // ===========================================================================
 
 // Semantic face categories.  Only the categories treesit cannot express live
-// here.  Buffer-local analysis emits the local-* categories and same-namespace
-// `:global-var'; the full tier adds cross-namespace `:global-var'.  The rest
-// arrive with later cross-file slices and are listed now so the contract is
-// stable.
+// here.  Buffer-local analysis emits the local-* categories, same-namespace
+// `:global-var', `:special-form' (special forms + core macros) and
+// `:macro-invocation' (known non-core macros -- user def-forms); the full tier
+// adds cross-namespace `:global-var'.  `:unresolved' arrives with a later
+// cross-file slice (it needs exhaustive, jar-inclusive knowledge) and is listed
+// now so the contract is stable.
 enum {
     CAT_LOCAL,             // a resolved local binding occurrence / usage
     CAT_LOCAL_UNUSED,      // a local binding never used in its scope (greyout)
     CAT_GLOBAL_VAR,        // resolved current-ns / cross-ns / referred var
-    CAT_SPECIAL_FORM,      // resolved special form                   (later)
-    CAT_MACRO_INVOCATION,  // resolved macro head                     (later)
-    CAT_UNRESOLVED,        // symbol resolving to nothing             (later)
+    CAT_SPECIAL_FORM,      // special form / core macro head (buffer-only)
+    CAT_MACRO_INVOCATION,  // known non-core macro head (a user def-form)
+    CAT_UNRESOLVED,        // symbol resolving to nothing                 (later)
     CAT__COUNT
 };
 static const char *const CATEGORY_NAMES[CAT__COUNT] = {
@@ -229,6 +249,7 @@ typedef struct {
     time_t    indexed_mtime; // mtime of the disk copy last indexed (0 = never)
     int       live;      // text came from a live buffer -> never clobber from disk
     int       opaque;    // dep that could not be read as UTF-8 -> never resolved
+    int       is_jar;    // surface came from a jar entry -> immutable, never re-read
 
     NsIndex   index;     // distilled ns surface (requires + vars), per check
     SemanticSpan *spans; // sorted by start, recomputed each check
@@ -365,8 +386,10 @@ static TSPoint advance_point(TSPoint p, const char *t, size_t from, size_t to) {
 // Derive one TSInputEdit from the longest common prefix/suffix of old vs new
 // text (two linear scans; prefix and suffix never overlap).  A correct
 // prefix/suffix edit always yields a correct tree; multi-spot edits coalesce
-// into one wider span (less reuse, never wrong).  The boundaries fall between
-// byte-identical runs, so no UTF-8 codepoint is split.
+// into one wider span (less reuse, never wrong).  The boundary may fall in the
+// middle of a multibyte codepoint (two chars can share a lead byte), but that
+// is harmless: tree-sitter's edits and this module's row/column are all counted
+// in bytes, so a sub-codepoint byte offset is consistent throughout.
 static TSInputEdit compute_edit(const char *o, size_t lo, const char *n, size_t ln) {
     size_t minlen = lo < ln ? lo : ln;
     size_t p = 0;
@@ -922,12 +945,44 @@ static const char *const DEF_FORMS[]  = { "def", "defonce", 0 };
 // the name is interned by extract_var_defs and must NOT be re-resolved here as a
 // reference -- otherwise the generic walk records a second (usage) NavRef at the
 // def site, double-counting it in find-references.  We skip the name and walk
-// the remainder as references; proper binding of deftype/defrecord fields and
-// defprotocol/definline arglists is deferred (PLAN), so those bodies are still
-// walked approximately -- but the name is never duplicated.
+// the remainder as references; proper binding of deftype/defrecord fields is
+// deferred (PLAN), so those bodies are still walked approximately -- but the
+// name is never duplicated.  (`defprotocol`/`definterface` are NOT here: their
+// bodies are pure declarations, handled opaquely in analyze_binding_form so the
+// interned method-var declaration sites are not re-recorded as usages.)
 static const char *const OTHER_DEF_FORMS[] = {
-    "defmulti", "definline", "deftest", "deftest-", "defprotocol",
-    "deftype", "defrecord", "definterface", "defstruct", 0
+    "defmulti", "definline", "deftest", "deftest-",
+    "deftype", "defrecord", "defstruct", 0
+};
+
+// Special forms + core macros -- the heads that read as `:special-form'.  Kept
+// in sync with the syntax layer's `replique-clojure-builtin-symbols-regexp'
+// (replique-clojure-mode.el), so the overlay's special-form hue and treesit's
+// keyword fallback agree on the same set.  Matched on the bare (unqualified)
+// name only, like the binding-form dispatch above.  A NON-core macro the module
+// knows is a macro (a user-declared def-form, `is_extra_def_form') reads as
+// `:macro-invocation' instead; unknown heads get neither (they may be ordinary
+// function calls -- claiming "macro" would false-positive without macro
+// knowledge / `:lint-as', which arrives later).
+static const char *const CORE_FORMS[] = {
+    "do", "if", "let*", "var", "fn", "fn*", "loop*", "recur",
+    "throw", "try", "catch", "finally", "set!", "new",
+    "monitor-enter", "monitor-exit", "quote", "->", "->>", "..", ".",
+    "amap", "and", "areduce", "as->", "assert", "binding", "bound-fn",
+    "case", "comment", "cond", "cond->", "cond->>", "condp",
+    "declare", "def", "definline", "definterface", "defmacro", "defmethod",
+    "defmulti", "defn", "defn-", "defonce", "defprotocol", "defrecord",
+    "defstruct", "deftype", "delay", "doall", "dorun", "doseq", "dosync",
+    "dotimes", "doto", "extend-protocol", "extend-type", "extend",
+    "for", "future", "gen-class", "gen-interface", "if-let", "if-not",
+    "if-some", "import", "in-ns", "io!", "lazy-cat", "lazy-seq", "let",
+    "letfn", "locking", "loop", "memfn", "ns", "or", "proxy", "proxy-super",
+    "pvalues", "refer-clojure", "reify", "some->", "some->>", "sync",
+    "time", "vswap!", "when", "when-first", "when-let", "when-not",
+    "when-some", "while", "with-bindings", "with-in-str",
+    "with-loading-context", "with-local-vars", "with-open",
+    "with-out-str", "with-precision", "with-redefs", "with-redefs-fn",
+    "deftest", "deftest-", "is", "are", "testing", 0
 };
 
 // Returns 1 if NODE (a list) was handled as a binding form.
@@ -938,6 +993,15 @@ static int analyze_binding_form(Analyzer *a, TSNode list, TSNode head) {
         // The `(ns ...)' form is distilled by analyze_requires; its require
         // specs are data (lib names, aliases), not value references -- so the
         // scope pass treats the whole form as opaque (matching scan_var_defs).
+        return 1;
+    }
+    if (sym_name_eq(text, head, "defprotocol") ||
+        sym_name_eq(text, head, "definterface")) {
+        // Pure declarations: a name, an optional docstring, method signatures
+        // (+ `defprotocol' options) -- no evaluated code to resolve.  Opaque
+        // here so the method-NAME declaration sites are not re-recorded as
+        // usages (record_var_def interns each method as a var with its def-site
+        // nav); usages of those methods elsewhere still resolve normally.
         return 1;
     }
     if (name_in(text, head, IF_LET_FORMS)) {
@@ -986,7 +1050,12 @@ static int analyze_binding_form(Analyzer *a, TSNode list, TSNode head) {
         return 1;
     }
     if (sym_name_eq(text, head, "defmethod")) {
-        // (defmethod multifn dispatch-val [params] body...)
+        // (defmethod multifn dispatch-val [params] body...).  `defmethod' does
+        // not define the multifn -- it extends an existing one -- so the multifn
+        // name at index 1 is a *reference* (like as->'s expr): resolve it for its
+        // face/nav and so its alias/`:refer'/fqn counts as a namespace usage.
+        TSNode multifn = nth_form(list, 1);
+        if (!ts_node_is_null(multifn)) analyze_node(a, multifn);
         TSNode dispatch = nth_form(list, 2);
         if (!ts_node_is_null(dispatch)) analyze_node(a, dispatch);
         analyze_fn_tail(a, list, 3);
@@ -1147,9 +1216,30 @@ static void analyze_node(Analyzer *a, TSNode node) {
 
     if (strcmp(t, "list_literal") == 0) {
         TSNode head = unwrap_meta(nth_form(node, 0));
-        if (!ts_node_is_null(head) && type_is(head, "symbol") &&
-            !sym_has_namespace(head) && analyze_binding_form(a, node, head))
-            return;
+        int bare_head = !ts_node_is_null(head) && type_is(head, "symbol") &&
+                        !sym_has_namespace(head);
+        if (bare_head) {
+            // Paint the head's semantic face before dispatching.  A known
+            // non-core macro (a user-declared def-form) reads as
+            // `:macro-invocation'; a special form / core macro reads as
+            // `:special-form'.  Painting here -- and skipping the head when we
+            // walk the body below -- keeps it from also being resolved as a
+            // `:global-var' (a core macro like `when' resolves to clojure.core
+            // once that jar is on the classpath).
+            int core = 0;
+            if (is_extra_def_form(a->ws, a->text, head))
+                push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
+                          CAT_MACRO_INVOCATION);
+            else if ((core = name_in(a->text, head, CORE_FORMS)))
+                push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
+                          CAT_SPECIAL_FORM);
+            if (analyze_binding_form(a, node, head))
+                return;
+            if (core) {                 // non-binding core form (if/when/cond/...)
+                analyze_body(a, node, 1);   // head already painted -- skip it
+                return;
+            }
+        }
         analyze_body(a, node, 0);   // generic: every child is a reference
         return;
     }
@@ -1450,6 +1540,17 @@ static const char *const VAR_DEF_FORMS[] = {
     "definterface", "defstruct", 0
 };
 
+// Forms whose method/instance bodies run on dispatch or method call -- NOT at
+// load time -- so, like `fn`, they are a function boundary for the var-def pass:
+// an inline `(def ...)` inside one is not the load-time surface and must not be
+// recorded (else it false-positives `redefined-var`).  `defmethod`'s body is
+// also scoped by the scope pass (analyze_fn_tail); the others are walked
+// generically there (proper field/arglist binding is deferred -- see PLAN), but
+// either way their bodies are never a load-time def site.
+static const char *const METHOD_BODY_FORMS[] = {
+    "defmethod", "reify", "proxy", "extend-type", "extend-protocol", 0
+};
+
 // Does NAME_W (possibly metadata-wrapped) carry `^:private` / `^{:private
 // true}`?  Walks the `with_metadata' wrappers above the defined symbol.
 static int name_has_private_meta(const char *text, TSNode name_w) {
@@ -1486,11 +1587,75 @@ static int is_opaque_wrapper(TSNode n) {
            strcmp(t, "eval_literal") == 0;
 }
 
-// Record the var defined by def-like list U (already unwrapped; HEAD verified
+// Intern one var named NAME[0,NAME_LEN) into F's NsIndex, with NAME_SPAN the
+// defined symbol's byte span (the jump target) and DEF_SPAN the whole defining
+// form.  NAME is copied (for the var) and, when RECORD_NAVS, copied again into a
+// def-site NAV_VAR occurrence (find-references / jump-to-def; keyed by name, so a
+// redefinition adds a second def nav).  The one place a var enters the index.
+static void intern_var(FileNode *f, const char *name, size_t name_len,
+                       uint32_t name_start, uint32_t name_end,
+                       uint32_t def_start, uint32_t def_end,
+                       int private, int record_navs) {
+    char *dup = malloc(name_len + 1);
+    memcpy(dup, name, name_len); dup[name_len] = '\0';
+    push_var(&f->index, dup, name_start, name_end, def_start, def_end, private);
+    if (record_navs)
+        push_nav(f, name_start, name_end, NAV_VAR, -1, name, name_len, 1);
+}
+
+// Intern a synthesized factory var PREFIX+TNAME (e.g. `->Foo`, `map->Foo` for
+// deftype/defrecord).  It has no source symbol of its own, so its name span is
+// the type name's span (NAME_START/END) -- jump-to-def lands on the type form.
+static void intern_factory(FileNode *f, const char *prefix,
+                           const char *tname, size_t tlen,
+                           uint32_t name_start, uint32_t name_end,
+                           uint32_t def_start, uint32_t def_end, int record_navs) {
+    size_t pl = strlen(prefix);
+    char *built = malloc(pl + tlen + 1);
+    memcpy(built, prefix, pl);
+    memcpy(built + pl, tname, tlen);
+    built[pl + tlen] = '\0';
+    intern_var(f, built, pl + tlen, name_start, name_end,
+               def_start, def_end, 0, record_navs);
+    free(built);
+}
+
+// Each method signature `(method-name [args] "doc"?)` in a defprotocol /
+// definterface body declares a var named for the method.  Walk the form's list
+// children (the docstring + `defprotocol' option keyword/value pairs are not
+// lists, so they are skipped) and intern each method name.  Clojure makes these
+// public; mirrors clj-kondo's `:analysis' (which records protocol/interface
+// method vars).
+static void record_method_vars(FileNode *f, const char *text, TSNode u,
+                               int record_navs) {
+    uint32_t k = 2; TSNode c;
+    while (!ts_node_is_null(c = nth_form(u, k))) {
+        TSNode cu = unwrap_meta(c);
+        if (type_is(cu, "list_literal")) {
+            TSNode mname = unwrap_meta(nth_form(cu, 0));
+            if (!ts_node_is_null(mname) && type_is(mname, "symbol")) {
+                TSNode mnm = field_name_node(mname);
+                if (!ts_node_is_null(mnm))
+                    intern_var(f, text + ts_node_start_byte(mnm),
+                               ts_node_end_byte(mnm) - ts_node_start_byte(mnm),
+                               ts_node_start_byte(mname), ts_node_end_byte(mname),
+                               ts_node_start_byte(cu), ts_node_end_byte(cu),
+                               0, record_navs);
+            }
+        }
+        k++;
+    }
+}
+
+// Record the var(s) defined by def-like list U (already unwrapped; HEAD verified
 // to be a def-like unqualified symbol) into F's NsIndex.  RECORD_NAVS adds the
 // def-site navigation occurrence -- wanted for the live buffer (find-references
 // / jump-to-def), skipped when indexing a dependency (its navs are never
-// queried; only its var surface is).
+// queried; only its var surface is).  Most forms define one var (the name at
+// index 1); the few that synthesize more get them too, for clj-kondo `:analysis'
+// parity: `defprotocol`/`definterface` -> one var per method name;
+// `deftype` -> the positional factory `->Name`; `defrecord` -> `->Name` and the
+// map factory `map->Name`.
 static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head,
                            int record_navs) {
     TSNode name_w = nth_form(u, 1);
@@ -1502,13 +1667,22 @@ static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head,
     TSNode nm = field_name_node(name);
     if (ts_node_is_null(nm)) return;
     uint32_t ns = ts_node_start_byte(name), ne = ts_node_end_byte(name);
-    push_var(&f->index, node_text_dup(text, nm), ns, ne,
-             ts_node_start_byte(u), ts_node_end_byte(u), private);
-    if (!record_navs) return;
-    // The def site, for find-references on the var (its usages are recorded by
-    // the scope pass).  Keyed by name -- a redefinition adds a second def nav.
-    uint32_t na = ts_node_start_byte(nm), nb = ts_node_end_byte(nm);
-    push_nav(f, ns, ne, NAV_VAR, -1, text + na, nb - na, 1);
+    uint32_t na = ts_node_start_byte(nm),   nb = ts_node_end_byte(nm);
+    uint32_t ds = ts_node_start_byte(u),    de = ts_node_end_byte(u);
+    // The primary var: the protocol/interface/type/var name itself.
+    intern_var(f, text + na, nb - na, ns, ne, ds, de, private, record_navs);
+
+    // Secondary vars some forms synthesize (see the function comment).
+    if (sym_name_eq(text, head, "defprotocol") ||
+        sym_name_eq(text, head, "definterface")) {
+        record_method_vars(f, text, u, record_navs);
+    } else if (sym_name_eq(text, head, "deftype") ||
+               sym_name_eq(text, head, "defrecord")) {
+        intern_factory(f, "->", text + na, nb - na, ns, ne, ds, de, record_navs);
+        if (sym_name_eq(text, head, "defrecord"))
+            intern_factory(f, "map->", text + na, nb - na, ns, ne, ds, de,
+                           record_navs);
+    }
 }
 
 // The reader-conditional feature keyword honored for PATH's dialect.  `.cljc`
@@ -1553,8 +1727,11 @@ static TSNode reader_conditional_branch(const char *text, const char *path, TSNo
 // OPAQUE -- only where evaluation does not reach at load time or the body is not
 // the public surface: a def-like form (its var is recorded, but its body is an
 // inline-def handled by a separate linter), a `(fn ...)`/`(fn* ...)` form or
-// `#(...)` literal (runs on call, not on load), an `(ns ...)` form, a
-// `(comment ...)` form, and quote/discard/eval reader wrappers.  A user
+// `#(...)` literal (runs on call, not on load), a deferred-body form whose
+// method/instance bodies run on dispatch or method call rather than at load
+// (`defmethod`/`reify`/`proxy`/`extend-type`/`extend-protocol` -- see
+// METHOD_BODY_FORMS), an `(ns ...)` form, a `(comment ...)` form, and
+// quote/discard/eval reader wrappers.  A user
 // `extra-def-form` (analysed like `defn`) is treated identically to a def-like
 // form: its name is interned and its body is a function boundary -- so the scope
 // pass and this pass agree on what such a form is.
@@ -1585,6 +1762,7 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
                 return;
             }
             if (name_in(text, head, FN_FORMS) ||       // (fn ...) / (fn* ...)
+                name_in(text, head, METHOD_BODY_FORMS) || // defmethod/reify/...
                 sym_name_eq(text, head, "ns") ||       // (ns ...)
                 sym_name_eq(text, head, "comment"))     // (comment ...)
                 return;                                 // opaque body
@@ -1691,11 +1869,19 @@ static int span_cmp(const void *x, const void *y) {
 // the already-known workspace files, or a user-picked directory) and hands the
 // directory list to `resolve_ns'; nothing about that choice is persisted.
 //
-// First consumer: cross-namespace `treejure-definition' (see resolve_cross_ns)
-// resolves an aliased/qualified or `:refer'-ed var to its defining file via
-// `resolve_ns' over the workspace classpath (directory entries; jars land in a
-// later slice).  Cross-file lints/faces and find-usages build on the same
-// primitives next.
+// `resolve_ns' searches both kinds of classpath entry: a source **directory**
+// (stat the candidate paths) and a **jar** (probe the candidate entries inside
+// it via the vendored miniz reader -- read_jar_entry).  A jar entry is parsed
+// and distilled once and cached as an immutable FileNode (jars do not change
+// within a session), keyed by a synthetic "<jar>!<entry>" path.
+//
+// First consumers: cross-namespace `treejure-definition' (see resolve_cross_ns)
+// and the scope pass's `:global-var' face both resolve an aliased/qualified or
+// `:refer'-ed var to its defining file via `resolve_ns' over the classpath --
+// now reaching library/`clojure.core' vars in jars, not just project sources.
+// (Jump-to-def *into* a jar entry needs Elisp that can open the entry; until
+// that slice a jar target paints a face but `M-.' lands nowhere -- gracefully.)
+// Cross-file lints/faces and find-usages build on the same primitives next.
 // ===========================================================================
 
 // The set of platforms a file participates in, as a bitmask.  `.cljc' counts as
@@ -1829,6 +2015,36 @@ static FileNode *index_disk_file(Workspace *ws, const char *path, time_t mtime) 
     return f;
 }
 
+// Index ENTRY (e.g. "clojure/string.clj") of the jar at JAR_PATH into a FileNode
+// keyed by KEY (the synthetic "<jar>!<entry>" path).  Jars are immutable per
+// session (PLAN fact #5): a once-indexed entry is cached forever and never
+// re-read -- so a cached KEY short-circuits before any jar I/O, and there is no
+// mtime gate.  Returns the (possibly cached) FileNode, or NULL when the entry is
+// absent in the jar (nothing is interned -- the resolver moves on / re-probes).
+// Like a disk dep, only the distilled surface (ns name + var defs) is kept; the
+// tree/text are dropped after extraction.
+static FileNode *index_jar_entry(Workspace *ws, const char *jar_path,
+                                 const char *entry, const char *key) {
+    FileNode *f = ws_find_file(ws, key);
+    if (f) return f;                      // immutable: cached entry stands
+    size_t len; char *buf = read_jar_entry(jar_path, entry, &len);
+    if (!buf) return NULL;                // entry not in this jar
+    f = ws_intern_file(ws, key);
+    f->is_jar = 1;
+    if (!is_valid_utf8(buf, len)) {       // non-UTF-8 entry -> opaque, never resolved
+        free(buf);
+        f->opaque = 1;
+        return f;
+    }
+    filenode_reparse(ws, f, buf, len);    // takes ownership of `buf`
+    filenode_clear_outputs(f);
+    extract_ns_name(f);
+    extract_var_defs(ws, f, f->text, ts_tree_root_node(f->tree), 0); // dep: no navs
+    ts_tree_delete(f->tree); f->tree = NULL;   // drop heavy state (surface kept)
+    free(f->text); f->text = NULL; f->len = 0;
+    return f;
+}
+
 // Source-file extensions, longest-lived first; `bb' last (rare, clj-equivalent).
 static const char *const CLJ_EXTS[] = { ".clj", ".cljs", ".cljc", ".cljd", ".bb", 0 };
 
@@ -1842,18 +2058,53 @@ static void ns_to_relpath(const char *ns, char *out, size_t cap) {
     out[j] = '\0';
 }
 
+// Is CP a jar classpath entry (a ".jar" path) rather than a source directory?
+static int is_jar_path(const char *cp) {
+    size_t n = strlen(cp);
+    return n >= 4 && memcmp(cp + n - 4, ".jar", 4) == 0;
+}
+
+// Probe REL (the ns-munged relative path) inside the jar at JAR for each source
+// extension; return the FileNode for the entry that declares NS, or NULL.  The
+// entry path is the jar-internal name ("clojure/string.clj"); the FileNode is
+// keyed by the synthetic "<jar>!<entry>" so jar surfaces never collide with
+// disk paths and are cached immutably (index_jar_entry).
+static FileNode *resolve_ns_in_jar(Workspace *ws, const char *jar, const char *rel,
+                                   const char *ns, unsigned mask) {
+    for (size_t e = 0; CLJ_EXTS[e]; e++) {
+        char entry[2200], key[8192];
+        int n1 = snprintf(entry, sizeof entry, "%s%s", rel, CLJ_EXTS[e]);
+        if (n1 < 0 || (size_t)n1 >= sizeof entry) continue;
+        if ((dialect_mask(entry) & mask) == 0) continue;   // disjoint platforms
+        int n2 = snprintf(key, sizeof key, "%s!%s", jar, entry);
+        if (n2 < 0 || (size_t)n2 >= sizeof key) continue;
+        FileNode *o = index_jar_entry(ws, jar, entry, key);
+        if (o && !o->opaque && o->index.ns_name &&
+            strcmp(o->index.ns_name, ns) == 0)
+            return o;   // exists in the jar and declares NS
+    }
+    return NULL;
+}
+
 // Lazily resolve NS to its source FileNode by searching DIRS (N_DIRS entries --
-// e.g. classpath directories, or a user-picked dir, supplied per call and NOT
-// stored).  Munges NS and `stat's only the candidate paths (dir x extension) on
-// a platform overlapping MASK -- no walk -- reads/caches each match and confirms
-// it actually declares NS.  SKIP_PATH (e.g. the live buffer) is never returned.
-// NULL if unresolved.  The seam later cross-file consumers call.
+// e.g. classpath directories and jars, or a user-picked dir, supplied per call
+// and NOT stored).  Munges NS and probes only the candidate names (entry x
+// extension) on a platform overlapping MASK -- no walk: a directory entry is
+// `stat'-ed, a jar entry is looked up in the jar's central directory -- reads/
+// caches each match and confirms it actually declares NS.  SKIP_PATH (e.g. the
+// live buffer) is never returned.  NULL if unresolved.  The seam later
+// cross-file consumers call.
 static FileNode *resolve_ns(Workspace *ws, const char *const *dirs, size_t n_dirs,
                             const char *ns, unsigned mask, const char *skip_path) {
     if (!ns || n_dirs == 0) return NULL;
     char rel[2048];
     ns_to_relpath(ns, rel, sizeof rel);
     for (size_t r = 0; r < n_dirs; r++) {
+        if (is_jar_path(dirs[r])) {        // a jar entry -- probe inside it
+            FileNode *o = resolve_ns_in_jar(ws, dirs[r], rel, ns, mask);
+            if (o) return o;
+            continue;
+        }
         for (size_t e = 0; CLJ_EXTS[e]; e++) {
             char path[4096];
             int n = snprintf(path, sizeof path, "%s/%s%s",
@@ -2112,8 +2363,8 @@ static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
 
 // Resolve the cross-namespace var named by SYM -- a qualified `alias/name' (or
 // fully-qualified `the.ns/name') or a bare `:refer'-ed `name' -- against F's
-// aliases/refers and WS's classpath (directory entries; jars resolve in a later
-// slice).  Reads the dependency lazily (resolve_ns), exactly at the query/check
+// aliases/refers and WS's classpath (source directories and jars alike).  Reads
+// the dependency lazily (resolve_ns), exactly at the query/check
 // that needs it.  Returns the defining FileNode and, via OUT (when non-NULL),
 // its VarDef; NULL when SYM does not resolve to a real var.  *OUT points into
 // the dep's var array, valid until the next indexing call -- use it at once.
@@ -2152,6 +2403,21 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
                 memcmp(ix->refers[i].name, nm, nlen) == 0)
                 target_ns = ix->refers[i].ns;
         if (!target_ns) return NULL;                   // same-ns/core/unresolved
+    }
+
+    // A fully-qualified reference to the file's OWN namespace (`my.ns/foo`
+    // inside `my.ns`) resolves to an in-file var.  resolve_ns skips the file
+    // itself (skip_path), so it would never resolve -- handle it here against
+    // the file's own var surface instead.
+    if (ix->ns_name && strcmp(target_ns, ix->ns_name) == 0) {
+        free(lit);
+        for (size_t v = 0; v < ix->n_vars; v++)
+            if (strlen(ix->vars[v].name) == nlen &&
+                memcmp(ix->vars[v].name, nm, nlen) == 0) {
+                if (out) *out = &ix->vars[v];
+                return f;
+            }
+        return NULL;
     }
 
     FileNode *dep;
@@ -2235,7 +2501,7 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
 
     uint32_t byte = (uint32_t)env->extract_integer(env, args[2]);
     NavRef *r = nav_at(f, byte);
-    if (!r || f->nnavs == 0) return Qnil(env);
+    if (!r) return Qnil(env);   // nav_at non-NULL implies f->nnavs > 0
 
     emacs_value *items = malloc(f->nnavs * sizeof(emacs_value));
     size_t k = 0;
