@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -54,10 +55,14 @@ int plugin_is_GPL_compatible;
 // positively resolve -- same-namespace defs (buffer-only, both tiers) and, at
 // the full tier, cross-namespace usages resolved over the classpath via
 // resolve_cross_ns_var (slice 4b's resolver).  This is false-positive-free: only
-// confirmed resolutions are painted.  What is still deferred needs exhaustive
-// (jar-inclusive) knowledge, else it false-positives: the `:unresolved' face and
-// the Tier-2 *warning* diagnostics (undefined var, unused require, …).  They,
-// jar reading, and project-wide find-usages are later slices (PLAN build-order
+// confirmed resolutions are painted.  The full tier also emits the
+// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires)
+// -- buffer-determinable from the require pass's alias/refer maps + the scope
+// pass's usage marking, so they read no dependencies (clj-kondo parity).  What
+// is still deferred needs exhaustive (jar-inclusive) knowledge, else it
+// false-positives: the `:unresolved' face and the dependency-reading Tier-2
+// *warning* diagnostics (undefined var, unresolved-namespace, …).  They, jar
+// reading, and project-wide find-usages are later slices (PLAN build-order
 // step 4+).  All positions are 0-based byte offsets; Elisp converts to buffer
 // positions on apply.
 // ---------------------------------------------------------------------------
@@ -103,13 +108,15 @@ enum {
     DIAG_REFER_ALL,              // :refer :all / :use without :only (Tier 1)
     DIAG_NAMESPACE_NAME_MISMATCH,// ns name disagrees with file path (Tier 1)
     DIAG_REDEFINED_VAR,          // var defined more than once in-file (Tier 1)
+    DIAG_UNUSED_NAMESPACE,       // required ns never used in the file (Tier 2)
+    DIAG_UNUSED_REFERRED_VAR,    // :refer-ed/:only var never used (Tier 2)
     DIAG__COUNT
 };
 static const char *const DIAG_IDS[DIAG__COUNT] = {
     ":syntax-error", ":missing-form", ":invalid-number", ":invalid-string",
     ":invalid-character", ":invalid-symbolic-value", ":unused-binding",
     ":duplicate-require", ":refer-all", ":namespace-name-mismatch",
-    ":redefined-var"
+    ":redefined-var", ":unused-namespace", ":unused-referred-var"
 };
 
 // Severity.  The keyword is what Flymake gets; the level configured for an id
@@ -165,6 +172,10 @@ typedef struct {
     uint32_t start, end;  // byte span of the lib symbol
     int      refer_all;   // :refer :all, or a bare :use spec
     int      from_use;    // came from a (:use ...) clause (message wording)
+    // `unused-namespace' eligibility + tracking (Tier 2, buffer-determinable).
+    int      has_alias;   // saw a real `:as' (loads the ns) -> warn if unused
+    int      has_refer_vec; // saw `:refer [..]'/`:only [..]' -> warn if unused
+    int      used;        // some usage referenced this ns (alias/fq/refer/`::')
 } ReqSpec;
 
 // One var defined in the file (the public/private surface).  Cross-file
@@ -181,7 +192,11 @@ typedef struct {
 // Both feed cross-namespace resolution: a qualified `a/foo` resolves `a` to its
 // ns, a bare referred `foo` resolves to the ns that referred it.
 typedef struct { char *alias; char *ns; } AliasEntry;
-typedef struct { char *name;  char *ns; } ReferEntry;
+typedef struct {
+    char    *name; char *ns;
+    uint32_t start, end;  // byte span of the referred symbol (diagnostic site)
+    int      used;         // referred var actually used in the file
+} ReferEntry;
 
 // The distilled namespace surface of a file: its ns name, the flattened
 // requires, the aliases/refers it brings into scope, and the vars it defines.
@@ -456,6 +471,42 @@ static int kw_name_eq(const char *text, TSNode kw, const char *s) {
 // references); everything else is walked generically.
 // ===========================================================================
 
+// A per-analysis-pass memo of resolve_ns results: namespace name -> resolved
+// FileNode, or NULL cached too (a core/unresolved ns must not re-`stat' the
+// classpath for every usage of it).  FileNode pointers stay valid across further
+// indexing within a pass -- the objects are individually heap-allocated and a
+// dep is not re-indexed mid-pass -- so caching them here is safe.  Owned and
+// freed by analyze_file; lives exactly one full-tier pass.
+typedef struct {
+    char     **names;
+    FileNode **deps;
+    size_t     n, cap;
+} NsCache;
+
+static FileNode *ns_cache_lookup(NsCache *c, const char *ns, int *found) {
+    for (size_t i = 0; i < c->n; i++)
+        if (strcmp(c->names[i], ns) == 0) { *found = 1; return c->deps[i]; }
+    *found = 0;
+    return NULL;
+}
+
+static void ns_cache_store(NsCache *c, const char *ns, FileNode *dep) {
+    if (c->n == c->cap) {
+        c->cap = c->cap ? c->cap * 2 : 8;
+        c->names = realloc(c->names, c->cap * sizeof(char *));
+        c->deps  = realloc(c->deps,  c->cap * sizeof(FileNode *));
+    }
+    c->names[c->n] = strdup(ns);
+    c->deps[c->n]  = dep;
+    c->n++;
+}
+
+static void ns_cache_free(NsCache *c) {
+    for (size_t i = 0; i < c->n; i++) free(c->names[i]);
+    free(c->names); free(c->deps);
+    c->names = NULL; c->deps = NULL; c->n = c->cap = 0;
+}
+
 typedef struct {
     Workspace *ws;
     FileNode  *f;
@@ -463,6 +514,7 @@ typedef struct {
     Local     *locals; size_t nlocals, cap_locals;
     int        next_local_id;   // monotonic per file, assigned at each binding
     int        cross_file;      // full tier: resolve + face cross-ns var usages
+    NsCache   *ns_cache;        // per-pass resolve_ns memo (NULL for point queries)
 } Analyzer;
 
 // Record a navigation occurrence.  NAME is duplicated for vars (NULL for
@@ -496,6 +548,24 @@ static void push_diag(FileNode *f, uint32_t start, uint32_t end,
     f->diags[f->ndiags++] = (Diagnostic){ start, end, sev, id, msg };
 }
 
+// Format a diagnostic message into a freshly-malloc'd, exactly-sized string
+// (the FileNode owns it; freed in filenode_clear_outputs).  vsnprintf sizes the
+// allocation, so there is no fixed buffer to overflow on a long ns/var name --
+// the canonical way to build every `push_diag' message.  Returns "" on the
+// can't-happen encoding error rather than NULL, so callers never null-check.
+static char *msg_printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return strdup("");
+    char *s = malloc((size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
+
 static void push_local(Analyzer *a, TSNode sym) {
     TSNode nm = field_name_node(sym);
     if (ts_node_is_null(nm)) return;
@@ -526,12 +596,8 @@ static void pop_scope(Analyzer *a, size_t mark) {
         push_span(a->f, l->start, l->end,
                   l->used ? CAT_LOCAL : CAT_LOCAL_UNUSED);
         if (!l->used && !l->underscore) {
-            char buf[256];
-            int n = snprintf(buf, sizeof buf, "unused binding %.*s",
-                             (int)l->name_len, l->name);
-            char *msg = malloc((n < 0 ? 0 : n) + 1);
-            memcpy(msg, buf, (n < 0 ? 0 : n));
-            msg[n < 0 ? 0 : n] = '\0';
+            char *msg = msg_printf("unused binding %.*s",
+                                   (int)l->name_len, l->name);
             push_diag(a->f, l->start, l->end, SEV_WARNING, DIAG_UNUSED_BINDING, msg);
         }
     }
@@ -541,7 +607,49 @@ static void pop_scope(Analyzer *a, size_t mark) {
 // The cross-file resolver primitive (defined with the workspace-model section):
 // resolve a qualified/`:refer'-ed symbol to its defining var on the classpath.
 static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
-                                      const VarDef **out);
+                                      NsCache *cache, const VarDef **out);
+
+// --- `unused-namespace' / `unused-referred-var' usage tracking -------------
+// Buffer-determinable (no dependency I/O): the scope pass marks each require /
+// referred var as it sees a usage, and lint_unused_requires reports the rest at
+// the full tier.  A namespace is "used" by an alias-qualified symbol, a fully-
+// qualified symbol, a `::alias/kw' auto-resolved keyword, or a syntax-quoted
+// qualified symbol -- matching clj-kondo (plain quote / discard / single-colon
+// `:alias/kw' do NOT count, and a plain or `:as-alias' require is never flagged).
+
+// Mark every require whose resolved namespace equals NS as used.
+static void mark_req_ns_used(NsIndex *ix, const char *ns) {
+    for (size_t i = 0; i < ix->n_requires; i++)
+        if (ix->requires[i].ns && strcmp(ix->requires[i].ns, ns) == 0)
+            ix->requires[i].used = 1;
+}
+
+// A namespace qualifier Q[0,QLEN) was used (a symbol's `ns/' part, or a `::'
+// keyword's namespace): resolve it through the aliases, else treat it as a
+// literal fully-qualified ns; either way mark the matching require(s) used.
+static void mark_ns_qualifier_used(NsIndex *ix, const char *q, size_t qlen) {
+    for (size_t i = 0; i < ix->n_aliases; i++)
+        if (strlen(ix->aliases[i].alias) == qlen &&
+            memcmp(ix->aliases[i].alias, q, qlen) == 0) {
+            mark_req_ns_used(ix, ix->aliases[i].ns);
+            return;
+        }
+    for (size_t i = 0; i < ix->n_requires; i++)   // literal fully-qualified use
+        if (ix->requires[i].ns && strlen(ix->requires[i].ns) == qlen &&
+            memcmp(ix->requires[i].ns, q, qlen) == 0)
+            ix->requires[i].used = 1;
+}
+
+// A bare NAME[0,LEN) was used; if it is a `:refer'-ed/`:only' var, mark that
+// referred var (and its providing require) used.
+static void mark_refer_used(NsIndex *ix, const char *name, size_t len) {
+    for (size_t i = 0; i < ix->n_refers; i++)
+        if (strlen(ix->refers[i].name) == len &&
+            memcmp(ix->refers[i].name, name, len) == 0) {
+            ix->refers[i].used = 1;
+            mark_req_ns_used(ix, ix->refers[i].ns);
+        }
+}
 
 // Resolve a reference symbol and record its navigation + semantic face:
 //   * a bare name matching a local (innermost first)  -> `:local'      + nav
@@ -583,15 +691,30 @@ static void resolve_ref(Analyzer *a, TSNode sym) {
                 memcmp(ix->vars[v].name, name, len) == 0) {
                 push_nav(a->f, ss, se, NAV_VAR, -1, name, len, 0);
                 push_span(a->f, ss, se, CAT_GLOBAL_VAR);
+                // An in-file def and a `:refer' of the same name collide in the
+                // global ns (ambiguous, unlike a lexical local shadow): count
+                // the occurrence as using the refer too, so the require is not
+                // falsely flagged unused (matching clj-kondo's leniency here).
+                mark_refer_used(ix, name, len);
                 return;
             }
         }
+        // Neither a local nor an in-file var: a bare name may be a `:refer'-ed
+        // var -- count it as using that referred var + its providing require.
+        mark_refer_used(ix, name, len);
+    } else {
+        // Qualified `q/name': the qualifier `q' (an alias, or a literal fully-
+        // qualified ns) is a namespace usage -- mark it for `unused-namespace'.
+        TSNode nsf = ts_node_child_by_field_name(sym, "namespace", 9);
+        if (!ts_node_is_null(nsf))
+            mark_ns_qualifier_used(&a->f->index, a->text + ts_node_start_byte(nsf),
+                                   ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
     }
     // Qualified, or a bare name that is neither local nor an in-file var: at the
     // full tier, paint `:global-var' when it resolves cross-namespace to a real
     // var (an alias/fqn `a/foo', or a `:refer'-ed bare `foo') via the classpath.
     // A core / jar-backed / unresolved target simply gets no face (no warning).
-    if (a->cross_file && resolve_cross_ns_var(a->ws, a->f, sym, NULL))
+    if (a->cross_file && resolve_cross_ns_var(a->ws, a->f, sym, a->ns_cache, NULL))
         push_span(a->f, ss, se, CAT_GLOBAL_VAR);
 }
 
@@ -627,9 +750,13 @@ static void bind_pattern(Analyzer *a, TSNode pat) {
         return;
     }
     if (type_is(pat, "map_literal")) {
-        // {:keys [a b] :as x :or {..} pat lookup ...}
+        // {:keys [a b] :as x :or {..} pat lookup ...}.  Two passes: bind every
+        // name first, THEN analyze the `:or' default values -- a default may
+        // reference any of the map's bindings (`{a (inc b)}'), and Clojure binds
+        // them all simultaneously, so the defaults must see them regardless of
+        // pair order within the map.
         uint32_t cnt = ts_node_named_child_count(pat);
-        for (uint32_t i = 0; i < cnt; i++) {
+        for (uint32_t i = 0; i < cnt; i++) {           // pass 1: bind names
             TSNode pair = ts_node_named_child(pat, i);
             if (!type_is(pair, "pair")) continue;
             TSNode key = unwrap_meta(ts_node_child_by_field_name(pair, "key", 3));
@@ -650,24 +777,30 @@ static void bind_pattern(Analyzer *a, TSNode pat) {
                     }
                 } else if (kw_name_eq(a->text, key, "as")) {
                     bind_pattern(a, val);
-                } else if (kw_name_eq(a->text, key, "or")) {
-                    // `:or {sym default ...}': only the default *values* are
-                    // expressions; the keys are the binding names being
-                    // defaulted, not usages -- so don't resolve them.
-                    TSNode m = unwrap_meta(val);
-                    if (!ts_node_is_null(m) && type_is(m, "map_literal")) {
-                        uint32_t mc = ts_node_named_child_count(m);
-                        for (uint32_t j = 0; j < mc; j++) {
-                            TSNode pr = ts_node_named_child(m, j);
-                            if (type_is(pr, "pair"))
-                                analyze_node(a, ts_node_child_by_field_name(pr, "value", 5));
-                        }
-                    }
                 }
-                // other namespaced/keyword directives: ignore
+                // `:or' handled in pass 2; other directives: ignore
             } else {
                 // {pattern lookup-key}: the key is the binding, value is data.
                 bind_pattern(a, key);
+            }
+        }
+        for (uint32_t i = 0; i < cnt; i++) {           // pass 2: `:or' defaults
+            TSNode pair = ts_node_named_child(pat, i);
+            if (!type_is(pair, "pair")) continue;
+            TSNode key = unwrap_meta(ts_node_child_by_field_name(pair, "key", 3));
+            if (ts_node_is_null(key) || !type_is(key, "keyword") ||
+                !kw_name_eq(a->text, key, "or")) continue;
+            // `:or {sym default ...}': only the default *values* are expressions;
+            // the keys are the binding names being defaulted, not usages, and are
+            // now in scope (pass 1) -- so resolve only the values.
+            TSNode m = unwrap_meta(ts_node_child_by_field_name(pair, "value", 5));
+            if (!ts_node_is_null(m) && type_is(m, "map_literal")) {
+                uint32_t mc = ts_node_named_child_count(m);
+                for (uint32_t j = 0; j < mc; j++) {
+                    TSNode pr = ts_node_named_child(m, j);
+                    if (type_is(pr, "pair"))
+                        analyze_node(a, ts_node_child_by_field_name(pr, "value", 5));
+                }
             }
         }
         return;
@@ -937,6 +1070,19 @@ static void scan_syntax_quote(Analyzer *a, TSNode node, int level) {
         else scan_syntax_quote(a, target, level - 1);     // still templated
         return;
     }
+    if (strcmp(t, "symbol") == 0) {
+        // A syntax-quoted qualified symbol namespace-resolves at read time, so
+        // its qualifier counts as a namespace usage (clj-kondo agrees), even
+        // though the symbol itself is templated data.
+        if (sym_has_namespace(node)) {
+            TSNode nsf = ts_node_child_by_field_name(node, "namespace", 9);
+            if (!ts_node_is_null(nsf))
+                mark_ns_qualifier_used(&a->f->index,
+                                       a->text + ts_node_start_byte(nsf),
+                                       ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
+        }
+        return;
+    }
     // An inner plain quote / var-quote / discard / eval-literal stays data.
     if (strcmp(t, "quote") == 0 || strcmp(t, "var_quote") == 0 ||
         strcmp(t, "discard") == 0 || strcmp(t, "eval_literal") == 0)
@@ -953,7 +1099,29 @@ static void analyze_node(Analyzer *a, TSNode node) {
     const char *t = ts_node_type(node);
 
     if (strcmp(t, "symbol") == 0) { resolve_ref(a, node); return; }
+    if (strcmp(t, "keyword") == 0) {
+        // `::alias/kw' (auto-resolved -- marker is the 2-byte `::') uses the
+        // alias' namespace; a single-colon `:ns/kw' is a literal keyword and
+        // does NOT count as a namespace usage (matching clj-kondo).
+        TSNode mk = ts_node_child_by_field_name(node, "marker", 6);
+        if (!ts_node_is_null(mk) &&
+            ts_node_end_byte(mk) - ts_node_start_byte(mk) == 2) {
+            TSNode nsf = ts_node_child_by_field_name(node, "namespace", 9);
+            if (!ts_node_is_null(nsf))
+                mark_ns_qualifier_used(&a->f->index,
+                                       a->text + ts_node_start_byte(nsf),
+                                       ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
+        }
+        return;
+    }
     if (strcmp(t, "with_metadata") == 0) {
+        analyze_node(a, ts_node_child_by_field_name(node, "target", 6));
+        return;
+    }
+    // A tagged literal `#tag form': only the tagged `target' form is code.  The
+    // `tag' is a data-reader name, not a var reference -- walking it would, for a
+    // qualified tag `#the.ns/x', wrongly count `the.ns' as a namespace usage.
+    if (strcmp(t, "tagged_literal") == 0) {
         analyze_node(a, ts_node_child_by_field_name(node, "target", 6));
         return;
     }
@@ -990,7 +1158,6 @@ static void analyze_node(Analyzer *a, TSNode node) {
     if (strcmp(t, "vector_literal") == 0 || strcmp(t, "map_literal") == 0 ||
         strcmp(t, "set_literal") == 0 || strcmp(t, "namespaced_map_literal") == 0 ||
         strcmp(t, "fn_literal") == 0 || strcmp(t, "pair") == 0 ||
-        strcmp(t, "tagged_literal") == 0 ||
         strcmp(t, "deref") == 0 || strcmp(t, "unquote") == 0 ||
         strcmp(t, "unquote_splicing") == 0) {
         analyze_body(a, node, 0);
@@ -1009,11 +1176,8 @@ static void analyze_node(Analyzer *a, TSNode node) {
 static void collect_grammar_diags(FileNode *f, TSNode node) {
     if (ts_node_is_missing(node)) {
         const char *tp = ts_node_type(node);
-        char buf[128];
-        int n = snprintf(buf, sizeof buf, "missing %s", tp);
-        char *msg = malloc(n + 1); memcpy(msg, buf, n); msg[n] = '\0';
         push_diag(f, ts_node_start_byte(node), ts_node_end_byte(node),
-                  SEV_ERROR, DIAG_MISSING_FORM, msg);
+                  SEV_ERROR, DIAG_MISSING_FORM, msg_printf("missing %s", tp));
     } else if (ts_node_is_error(node)) {
         push_diag(f, ts_node_start_byte(node), ts_node_end_byte(node),
                   SEV_ERROR, DIAG_SYNTAX_ERROR, strdup("syntax error"));
@@ -1083,7 +1247,10 @@ static void push_req(NsIndex *ix, char *ns, uint32_t s, uint32_t e,
         ix->cap_requires = ix->cap_requires ? ix->cap_requires * 2 : 8;
         ix->requires = realloc(ix->requires, ix->cap_requires * sizeof(ReqSpec));
     }
-    ix->requires[ix->n_requires++] = (ReqSpec){ ns, s, e, refer_all, from_use };
+    // has_alias / has_refer_vec / used default 0 here; parse_lib_spec sets the
+    // eligibility flags on the vector branch, and the scope pass sets `used'.
+    ix->requires[ix->n_requires++] =
+        (ReqSpec){ ns, s, e, refer_all, from_use, 0, 0, 0 };
 }
 
 static void push_var(NsIndex *ix, char *name, uint32_t ns, uint32_t ne,
@@ -1111,7 +1278,8 @@ static void push_refer(NsIndex *ix, const char *text, TSNode sym, const char *ns
         ix->refers = realloc(ix->refers, ix->cap_refers * sizeof(ReferEntry));
     }
     ix->refers[ix->n_refers++] =
-        (ReferEntry){ node_text_dup(text, sym), strdup(ns) };
+        (ReferEntry){ node_text_dup(text, sym), strdup(ns),
+                      ts_node_start_byte(sym), ts_node_end_byte(sym), 0 };
 }
 
 // Parse one lib spec (symbol | vector | prefix-list) into IX.  PREFIX is the
@@ -1133,6 +1301,11 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
         if (ts_node_is_null(lib) || !type_is(lib, "symbol")) return;
         char *ns = with_prefix(prefix, node_text_dup(text, lib));
         int refer_all = from_use;
+        // `:as' (a real, ns-loading alias) and a `:refer [..]'/`:only [..]'
+        // vector each make the require eligible for `unused-namespace'.
+        // `:as-alias' (keyword-only) and a plain spec do NOT -- matching
+        // clj-kondo (an `:as-alias' / plain require is never flagged unused).
+        int has_alias = 0, has_refer_vec = 0;
         uint32_t k = 1; TSNode opt;
         while (!ts_node_is_null(opt = nth_form(spec, k))) {
             TSNode ou = unwrap_meta(opt);
@@ -1141,6 +1314,7 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
                     TSNode al = unwrap_meta(nth_form(spec, k + 1));
                     if (!ts_node_is_null(al) && type_is(al, "symbol"))
                         push_alias(ix, text, al, ns);
+                    if (kw_name_eq(text, ou, "as")) has_alias = 1;
                     k += 2; continue;
                 }
                 if (kw_name_eq(text, ou, "refer") || kw_name_eq(text, ou, "only")) {
@@ -1150,6 +1324,7 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
                         refer_all = 1;
                     } else if (!ts_node_is_null(v) && type_is(v, "vector_literal")) {
                         refer_all = 0;
+                        has_refer_vec = 1;
                         uint32_t r = 0; TSNode rs;     // referred var names
                         while (!ts_node_is_null(rs = nth_form(v, r))) {
                             TSNode ru = unwrap_meta(rs);
@@ -1165,6 +1340,8 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
         }
         push_req(ix, ns, ts_node_start_byte(lib), ts_node_end_byte(lib),
                  refer_all, from_use);
+        ix->requires[ix->n_requires - 1].has_alias = has_alias;
+        ix->requires[ix->n_requires - 1].has_refer_vec = has_refer_vec;
         return;
     }
     if (type_is(spec, "list_literal")) {
@@ -1256,13 +1433,8 @@ static void analyze_ns_form(FileNode *f, const char *text, TSNode ns_list) {
         for (size_t p = 0; p < i; p++) {
             if (s->ns && ix->requires[p].ns &&
                 strcmp(s->ns, ix->requires[p].ns) == 0) {
-                char buf[256];
-                int n = snprintf(buf, sizeof buf, "duplicate require of %s", s->ns);
-                char *msg = malloc((n < 0 ? 0 : n) + 1);
-                memcpy(msg, buf, (n < 0 ? 0 : n));
-                msg[n < 0 ? 0 : n] = '\0';
-                push_diag(f, s->start, s->end, SEV_WARNING,
-                          DIAG_DUPLICATE_REQUIRE, msg);
+                push_diag(f, s->start, s->end, SEV_WARNING, DIAG_DUPLICATE_REQUIRE,
+                          msg_printf("duplicate require of %s", s->ns));
                 break;
             }
         }
@@ -1347,7 +1519,8 @@ static const char *dialect_feature(const char *path) {
     if (!dot) return "clj";
     if (strcmp(dot, ".cljs") == 0) return "cljs";
     if (strcmp(dot, ".cljd") == 0) return "cljd";
-    return "clj";   // .clj / .cljc / .cljr / .bb / unknown -> clj
+    if (strcmp(dot, ".cljr") == 0) return "cljr";
+    return "clj";   // .clj / .cljc / .bb / unknown -> clj
 }
 
 // The reader-conditional branch live for PATH's dialect: the platform feature
@@ -1442,16 +1615,39 @@ static void lint_redefined_var(FileNode *f) {
     for (size_t i = 0; i < ix->n_vars; i++) {
         for (size_t p = 0; p < i; p++) {
             if (strcmp(ix->vars[i].name, ix->vars[p].name) == 0) {
-                char buf[256];
-                int n = snprintf(buf, sizeof buf, "redefined var %s", ix->vars[i].name);
-                char *msg = malloc((n < 0 ? 0 : n) + 1);
-                memcpy(msg, buf, (n < 0 ? 0 : n));
-                msg[n < 0 ? 0 : n] = '\0';
                 push_diag(f, ix->vars[i].name_start, ix->vars[i].name_end,
-                          SEV_WARNING, DIAG_REDEFINED_VAR, msg);
+                          SEV_WARNING, DIAG_REDEFINED_VAR,
+                          msg_printf("redefined var %s", ix->vars[i].name));
                 break;
             }
         }
+    }
+}
+
+// `unused-namespace' + `unused-referred-var' (Tier 2, buffer-determinable): a
+// required ns whose alias / `:refer'-ed vars / fully-qualified name is never
+// used in the file, and each `:refer'-ed / `:only' var never used.  The scope
+// pass set the `used' flags as it walked the buffer; this reports the rest.
+// A plain require or an `:as-alias'-only require is never flagged unused
+// (matching clj-kondo) -- only an `:as'-aliased or `:refer'/`:only' require is
+// eligible.  Reads no dependencies: this is buffer-only, just emitted at the
+// full tier (its PLAN Tier-2 cadence) so it does not flash during after-edit.
+static void lint_unused_requires(FileNode *f) {
+    NsIndex *ix = &f->index;
+    for (size_t i = 0; i < ix->n_requires; i++) {
+        ReqSpec *r = &ix->requires[i];
+        if (r->used || r->refer_all) continue;
+        if (!r->has_alias && !r->has_refer_vec) continue;   // plain / :as-alias
+        push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_NAMESPACE,
+                  msg_printf("namespace %s is required but never used",
+                             r->ns ? r->ns : "?"));
+    }
+    for (size_t i = 0; i < ix->n_refers; i++) {
+        ReferEntry *r = &ix->refers[i];
+        if (r->used) continue;
+        push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_REFERRED_VAR,
+                  msg_printf("referred var %s/%s is never used",
+                             r->ns ? r->ns : "?", r->name));
     }
 }
 
@@ -1693,21 +1889,29 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
     extract_var_defs(ws, f, f->text, root, 1);   // live buffer: record def navs
     lint_redefined_var(f);
 
+    NsCache ns_cache = { 0 };     // per-pass resolve_ns memo (full tier only)
     Analyzer a = { .ws = ws, .f = f, .text = f->text,
                    .locals = NULL, .nlocals = 0, .cap_locals = 0,
-                   .next_local_id = 0, .cross_file = cross_file };
+                   .next_local_id = 0, .cross_file = cross_file,
+                   .ns_cache = &ns_cache };
     analyze_body(&a, root, 0);   // top level: every form is a reference context
     free(a.locals);
+    ns_cache_free(&ns_cache);
 
     // --- Cross-file facts (full tier only; resolves deps lazily) -----------
     // The `:global-var' face is already emitted by the scope pass above: same-
     // namespace var usages at both tiers, and -- gated on `cross_file' inside
     // resolve_ref -- cross-namespace usages that resolve via the classpath.
     if (cross_file) {
+        // `unused-namespace' / `unused-referred-var': buffer-determinable, so it
+        // needs no dependency I/O -- the scope pass already flagged each used
+        // require / referred var above.  Emitted only here (not the fast tier)
+        // so it tracks the PLAN's Tier-2 cadence and does not flash on edit.
+        lint_unused_requires(f);
         // Remaining Tier-2 work attaches here: the `:unresolved' face and the
-        // dependency lints (unresolved-namespace, unused-namespace, undefined
-        // var, ...).  These need exhaustive, jar-inclusive knowledge to avoid
-        // false positives, so they land with the jar slice (PLAN step 4).
+        // dependency lints that DO need disk reads (unresolved-namespace,
+        // undefined var, ...).  Those need exhaustive, jar-inclusive knowledge
+        // to avoid false positives, so they land with the jar slice (PLAN step 4).
     }
 
     if (f->nspans > 1)
@@ -1818,9 +2022,11 @@ static emacs_value diagnostics_to_lisp(emacs_env *env, FileNode *f) {
 // Incremental reparse + grammar diagnostics + buffer-local scope pass, then --
 // when CROSS-FILE-P is non-nil (the full tier) -- the cross-file facts.  The
 // flag is routed to analyze_file, which runs the buffer-only facts at both
-// tiers and gates the cross-file pass (Tier-2 lints/faces) behind it so the
-// after-edit fast tier never does dependency I/O.  No cross-file lint/face
-// consumer ships yet (PLAN step 4), so the full tier adds no extra facts today.
+// tiers and gates the full-tier pass behind it so the after-edit fast tier
+// never does dependency I/O.  The full tier already differs from the fast tier:
+// it paints cross-namespace `:global-var' faces (slices 4b/4c) and emits the
+// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires).
+// The dependency-reading Tier-2 lints/faces are still later slices (PLAN step 4).
 static emacs_value f_check_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
     Workspace *ws = env->get_user_ptr(env, args[0]);
     if (!ws) return Qnil(env);
@@ -1911,10 +2117,11 @@ static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
 // that needs it.  Returns the defining FileNode and, via OUT (when non-NULL),
 // its VarDef; NULL when SYM does not resolve to a real var.  *OUT points into
 // the dep's var array, valid until the next indexing call -- use it at once.
-// Shared by `treejure-definition' (-> a location) and the scope pass's
-// `:global-var' face (-> existence only, OUT == NULL).
+// Shared by `treejure-definition' (-> a location, CACHE == NULL: one query) and
+// the scope pass's `:global-var' face (-> existence only, OUT == NULL, CACHE set
+// so the same target ns is resolved at most once per pass).
 static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
-                                      const VarDef **out) {
+                                      NsCache *cache, const VarDef **out) {
     TSNode nmf = field_name_node(sym);
     if (ts_node_is_null(nmf)) return NULL;
     uint32_t na = ts_node_start_byte(nmf), nb = ts_node_end_byte(nmf);
@@ -1923,7 +2130,7 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
     NsIndex *ix = &f->index;
 
     const char *target_ns = NULL;
-    char litbuf[1024];
+    char *lit = NULL;                  // owned literal-ns buffer (freed below)
     TSNode nsf = ts_node_child_by_field_name(sym, "namespace", 9);
     if (!ts_node_is_null(nsf)) {                       // qualified: alias or fqn
         uint32_t aa = ts_node_start_byte(nsf), ab = ts_node_end_byte(nsf);
@@ -1934,10 +2141,10 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
                 memcmp(ix->aliases[i].alias, al, alen) == 0)
                 target_ns = ix->aliases[i].ns;
         if (!target_ns) {                              // not an alias -> literal ns
-            if (alen >= sizeof litbuf) return NULL;
-            memcpy(litbuf, al, alen);
-            litbuf[alen] = '\0';
-            target_ns = litbuf;
+            lit = malloc(alen + 1);
+            memcpy(lit, al, alen);
+            lit[alen] = '\0';
+            target_ns = lit;
         }
     } else {                                           // bare: a referred var
         for (size_t i = 0; i < ix->n_refers && !target_ns; i++)
@@ -1947,9 +2154,16 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
         if (!target_ns) return NULL;                   // same-ns/core/unresolved
     }
 
-    FileNode *dep = resolve_ns(ws, (const char *const *)ws->classpath,
-                               ws->n_classpath, target_ns,
-                               dialect_mask(f->path), f->path);
+    FileNode *dep;
+    int found = 0;
+    if (cache) dep = ns_cache_lookup(cache, target_ns, &found);
+    if (!found) {
+        dep = resolve_ns(ws, (const char *const *)ws->classpath,
+                         ws->n_classpath, target_ns,
+                         dialect_mask(f->path), f->path);
+        if (cache) ns_cache_store(cache, target_ns, dep);
+    }
+    free(lit);                         // resolve_ns / ns_cache_store copied it
     if (!dep) return NULL;
     for (size_t v = 0; v < dep->index.n_vars; v++)
         if (strlen(dep->index.vars[v].name) == nlen &&
@@ -1965,7 +2179,7 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
 static emacs_value resolve_cross_ns(emacs_env *env, Workspace *ws,
                                     FileNode *f, TSNode sym) {
     const VarDef *vd = NULL;
-    FileNode *dep = resolve_cross_ns_var(ws, f, sym, &vd);
+    FileNode *dep = resolve_cross_ns_var(ws, f, sym, NULL, &vd);
     if (!dep || !vd) return Qnil(env);
     return location_to_lisp(env, dep, vd->name_start, vd->name_end);
 }
