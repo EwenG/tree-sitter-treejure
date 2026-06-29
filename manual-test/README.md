@@ -9,12 +9,13 @@ Things to watch:
     face): a resolved local binding **and every usage of it**.
   - `:local-unused` → `replique-clojure-unused-face` (defaults to `shadow`,
     i.e. greyed out): a local binding that is never used in its scope.
-  - `:global-var` → `font-lock-variable-name-face` (default): a var **usage**
-    that positively resolves — a **same-namespace** def (painted immediately,
-    after-edit) or, on the **full tier** (save / buffer-switch / `M-.`), a
-    **cross-namespace** usage (aliased/qualified or `:refer`-ed) resolved via a
-    project source dir. A core / library / jar-backed symbol gets **no** face —
-    not a false report, just not resolved yet (same boundary as jump-to-def).
+  - `:special-form` / `:macro-invocation` → form-head faces: a special form /
+    core macro head, and a known non-core macro head (a user def-form).
+  - **No var face.** A resolved var (same- or cross-namespace) is colored by the
+    treesit **syntax** layer, not the semantic overlay — so the overlay paints
+    only locals + form heads, which also makes `:local` stand out. Var usages
+    still resolve under the hood (that drives `M-.`); resolution just no longer
+    drives a face.
 - **Flymake diagnostics** (underlines; `M-x flymake-show-buffer-diagnostics`):
   - `unused-binding` warnings (one per greyed binding, except `_`-names).
   - `duplicate-require`, `refer-all`, `namespace-name-mismatch` warnings from
@@ -51,14 +52,15 @@ the rest of the cross-file workspace tier (PLAN step 4+).
 reads.)
 
 **Jar-backed resolution** now exists in the C module (the jar slice: it reads
-`clojure.core` / library namespaces out of jars on the classpath and paints
-their usages `:global-var`), but this bench does **not** exercise it: the
-interim Elisp classpath seeds only your project **source dirs**
-(`replique-clojure-semantic-source-dirs`), not jars — the JVM oracle supplies
-the full jar classpath later (PLAN step 6). So `clojure.core`/library symbols
-still get no `:global-var` face and no `M-.` here, exactly as before; the jar
-capability is verified by the module's own white-box harness instead.
-(Navigating *into* a jar entry is also still a later slice.)
+`clojure.core` / library namespaces out of jars on the classpath), but this
+bench does **not** exercise it by default: the interim Elisp classpath seeds
+only your project **source dirs** (`replique-clojure-semantic-source-dirs`), not
+jars — the JVM oracle supplies the full jar classpath later (PLAN step 6). So
+`clojure.core`/library symbols do not resolve for `M-.` here by default; the jar
+capability is verified by the module's own white-box harness instead. (Once a
+jar IS on the classpath — e.g. via `manualtest-jar-check` below — `M-.` on a jar
+var navigates *into* the jar entry's source, opened read-only: the jar-nav
+slice.)
 
 ## Files
 
@@ -71,23 +73,26 @@ capability is verified by the module's own white-box harness instead.
 | `src/manualtest/syntax_quote.clj`   | syntax-quote: `~`/`~@` count as usages; nested-quote levels |
 | `src/manualtest/ns_scope.clj`       | `(ns …)` form is data — no phantom var refs at require sites |
 | `src/manualtest/requires.clj`       | `duplicate-require` / `refer-all` from the ns require pass |
-| `src/manualtest/unused_requires.clj` | `unused-namespace` / `unused-referred-var` (full tier); alias/`::`-kw/syntax-quote count as usage; plain & `:as-alias` never flagged |
+| `src/manualtest/unused_requires.clj` | `unused-namespace` / `unused-referred-var` (full tier); alias/`::`-kw/syntax-quote (qualified **and** bare-`:refer`) count as usage; plain & `:as-alias` never flagged |
 | `src/manualtest/redefinitions.clj`  | `redefined-var`; load-time descent (`do`/`when`) vs fn/quote/comment opacity |
-| `src/manualtest/defmethods.clj`     | `defmethod` multifn is a *usage*: marks its require/`:refer` used (no false unused-require) + `:global-var` face; same-ns + cross-ns (`nt/area`, referred `shape-name` in `nav_target.clj`) |
-| `src/manualtest/protocol_types.clj` | secondary var interning: `defprotocol`/`definterface` method vars + `deftype`/`defrecord` factory vars (`->Name`, `map->Name`) get `:global-var` faces and `M-.`/`M-?` |
+| `src/manualtest/defmethods.clj`     | `defmethod` multifn is a *usage*: marks its require/`:refer` used (no false unused-require); resolves for `M-.` (no face); same-ns + cross-ns (`nt/area`, referred `shape-name` in `nav_target.clj`) |
+| `src/manualtest/protocol_types.clj` | secondary var interning: `defprotocol`/`definterface` method vars + `deftype`/`defrecord` factory vars (`->Name`, `map->Name`) are interned so `M-.`/`M-?` reach their usages (no var face) |
 | `src/manualtest/grammar_errors.clj` | all grammar-level diagnostics (this file is **intentionally broken**) |
 | `src/manualtest/extra_def_forms.clj` | user macros analysed like `defn` (see `.dir-locals.el`) |
 | `src/manualtest/cljs_demo.cljs`     | ClojureScript buffer (same local analysis) |
 | `src/manualtest/reader_conditionals.cljc` | `.cljc` reader conditionals; branch-aware var defs (`:clj` honored) |
-| `src/manualtest/global_vars.clj`    | `:global-var` faces: same-ns (fast tier) + cross-ns (full tier) resolved usages; shadowing → `:local`; core/jar/unresolved → no face |
-| `src/manualtest/navigation.clj`     | `xref` `M-.` / `M-?`: locals, same-ns vars, cross-file (aliased/qualified/`:refer`-ed) jump-to-def; **and `:global-var` faces** on the resolved same-ns + cross-ns usages |
+| `src/manualtest/cond_requires.cljc` | requires nested in a reader conditional (`#?`/`#?@` splicing) are extracted + linted for the file's dialect (`:clj`); diffs byte-identical to clj-kondo |
+| `src/manualtest/global_vars.clj`    | the var-face decision: vars get **no** semantic face (treesit colors them), locals do; shadowing → `:local`; resolution still drives `M-.` |
+| `src/manualtest/navigation.clj`     | `xref` `M-.` / `M-?`: locals, same-ns vars, cross-file (aliased/qualified/`:refer`-ed) jump-to-def |
 | `src/manualtest/nav_target.clj`     | the cross-file jump **target** for `navigation.clj` + `defmethods.clj` (open only to confirm jumps arrive) |
-| `src/manualtest/jar_resolution.clj` | **jar-backed** `:global-var` faces (clojure.string/clojure.set); needs `jar-manual-test.el` (`M-x manualtest-jar-check`) to put a jar on the classpath |
+| `src/manualtest/jar_resolution.clj` | **jar-backed** jump-to-def (clojure.string/clojure.set); needs `jar-manual-test.el` (`M-x manualtest-jar-check`) to put a jar on the classpath |
 
 To try the **jar slice** in-editor, open `jar_resolution.clj`, then
 `M-x load-file RET jar-manual-test.el RET` and `M-x manualtest-jar-check` — it
 adds a real `clojure-*.jar` (auto-found under `~/.m2`) to that buffer's
-classpath and re-checks, so the jar-backed usages light up. `M-x
+classpath and re-checks, so the jar-backed usages light up. With the jar on the
+classpath, `M-.` on a jar var (e.g. `str/upper-case`) now also navigates into
+the jar entry's source (`clojure/string.clj`), opened read-only. `M-x
 manualtest-jar-reset` drops it again. (This is bench-only scaffolding for the
 gap until the JVM oracle supplies the real jar classpath.)
 

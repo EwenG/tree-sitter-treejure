@@ -21,7 +21,12 @@
    [manualtest.widgets :as-alias widget]
    ;; aliased, used ONLY inside a syntax-quote template → no warning
    ;; (a syntax-quoted qualified symbol namespace-resolves at read time).
-   [manualtest.macros :as mac]))
+   ;; `run-bare' is `:refer'-ed and used ONLY as a BARE symbol inside a
+   ;; syntax-quote template → no UNUSED-REFERRED-VAR: a syntax-quoted bare
+   ;; symbol auto-qualifies to the referred var at read time, so it counts as a
+   ;; usage.  (Regression guard: this used to FALSELY warn — the syntax-quote
+   ;; walk dropped bare symbols.  Contrast `prewalk' above, never used → warns.)
+   [manualtest.macros :as mac :refer [run-bare]]))
 
 (defn demo [xs]
   (str/join "," (walk identity identity xs)))   ; uses str + walk
@@ -29,4 +34,5 @@
 (def route-id ::route/x)                        ; uses the :as-alias `route'
 
 (defmacro expand []
-  `(mac/run))                                   ; uses `mac' via syntax-quote
+  `(do (mac/run)                                ; uses `mac' (alias) via syntax-quote
+       (run-bare)))                             ; uses `run-bare' (bare :refer) via syntax-quote

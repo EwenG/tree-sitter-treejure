@@ -5,8 +5,8 @@
   ;; all matching clj-kondo exactly:
   ;;   * a cross-ns multifn marks its require USED → no false `unused-namespace'
   ;;     (and a `:refer'-ed multifn → no false `unused-referred-var');
-  ;;   * the multifn name gets the `:global-var' face — same-ns on the fast tier,
-  ;;     cross-ns on the full tier (save / buffer-switch / `M-.');
+  ;;   * the multifn name resolves (no var face — treesit colors it — but `M-.'
+  ;;     lands on the multifn def, same-ns or cross-ns);
   ;;   * `M-?' (find-references) on a same-ns multifn includes the defmethod site.
   ;; If the multifn reference were dropped (the bug this guards against), the two
   ;; requires below would BOTH be flagged unused — clj-kondo flags NEITHER.
@@ -17,17 +17,17 @@
 ;; 1. Same-namespace multimethod: defmulti + defmethod (FAST tier).
 ;; ---------------------------------------------------------------------------
 
-;; `describe' is a same-ns var (defmulti).  The def NAME is treesit-faced here,
-;; NOT `:global-var'.
+;; `describe' is a same-ns var (defmulti).  The def NAME is treesit-faced here.
 (defmulti describe :kind)
 
-;; The `describe' multifn name here IS a same-ns var usage → `:global-var'
-;; (fast tier).  `M-?' on `describe' includes this site (+ the defmulti, + the
-;; method below).  `shape' is a :local (destructured param).
+;; The `describe' multifn name here IS a same-ns var usage (no semantic face —
+;; treesit colors it).  `M-?' on `describe' includes this site (+ the defmulti,
+;; + the method below).  `shape' is a :local (destructured param).
 (defmethod describe :circle [{:keys [shape]}]
   (str "circle " shape))
 
-;; A second method — another same-ns `:global-var' occurrence of `describe'.
+;; A second method — another same-ns usage of `describe' (find-references finds
+;; it).
 (defmethod describe :default [_]
   "unknown")
 
@@ -36,8 +36,8 @@
 ;; ---------------------------------------------------------------------------
 
 ;; The aliased multifn `nt/area' is a cross-ns usage → it marks the
-;; `manualtest.nav-target' require USED (so: NO `unused-namespace' on `nt')
-;; and gets `:global-var' on the whole `nt/area' symbol (full tier).
+;; `manualtest.nav-target' require USED (so: NO `unused-namespace' on `nt').
+;; No face (treesit colors `nt/area'); `M-.' resolves it (full tier).
 ;; `side' is a :local.
 (defmethod nt/area :square [{:keys [side]}]
   (* side side))
@@ -47,7 +47,7 @@
 ;; ---------------------------------------------------------------------------
 
 ;; The bare referred multifn `shape-name' marks the `:refer [shape-name]' USED
-;; (so: NO `unused-referred-var') and gets `:global-var' (full tier).
+;; (so: NO `unused-referred-var').  No face; `M-.' resolves it (full tier).
 (defmethod shape-name :triangle [_]
   "triangle")
 

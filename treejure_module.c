@@ -49,18 +49,21 @@ int plugin_is_GPL_compatible;
 //     bindings + their usages by `local_id'; same-ns var defs + their in-file
 //     usages by name); `treejure-definition' / `treejure-references' answer a
 //     point query by resolved identity (shadowing-correct).  `treejure-definition'
-//     also resolves **cross-namespace** targets (slice 4b): an aliased/qualified
-//     or `:refer'-ed var -> its def in the dependency `resolve_ns' finds over the
+//     also resolves **cross-namespace** targets: an aliased/qualified or
+//     `:refer'-ed var -> its def in the dependency `resolve_ns' finds over the
 //     classpath (see resolve_cross_ns), read lazily at the query.
 //
-// The `:global-var' face IS emitted: the scope pass paints var usages that
-// positively resolve -- same-namespace defs (buffer-only, both tiers) and, at
-// the full tier, cross-namespace usages resolved over the classpath via
-// resolve_cross_ns_var (slice 4b's resolver).  This is false-positive-free: only
-// confirmed resolutions are painted.  The full tier also emits the
-// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires)
-// -- buffer-determinable from the require pass's alias/refer maps + the scope
-// pass's usage marking, so they read no dependencies (clj-kondo parity).
+// There is deliberately NO var face.  A resolved var -- same- or cross-namespace
+// -- is left to the syntax layer: treesit already colors a qualified symbol's
+// namespace and the def-name forms, so the semantic overlay paints only what
+// treesit cannot (locals + form heads).  This keeps the whole scope pass
+// buffer-only: it reaches no `resolve_ns' call at either tier and so does NO
+// dependency I/O; cross-namespace resolution survives only for the jump-to-def
+// point query.  The full tier still emits the `unused-namespace' /
+// `unused-referred-var' Tier-2 lints (lint_unused_requires) -- buffer-
+// determinable from the require pass's alias/refer maps + the scope pass's usage
+// marking, so they too read no dependencies (clj-kondo parity).  The full-tier
+// flag now selects only that lint *cadence*, not dependency I/O.
 //
 // The head of every list form is also classified, buffer-only: a special form
 // or core macro gets `:special-form', and a *known* non-core macro (a
@@ -70,13 +73,14 @@ int plugin_is_GPL_compatible;
 // ordinary function); broader macro knowledge (`:lint-as', library macros)
 // arrives later.  The CORE_FORMS set is kept in sync with the syntax layer.
 //
-// Cross-namespace resolution now reaches **jars** (the jar slice): `resolve_ns'
+// Cross-namespace resolution reaches **jars** (the jar slice): `resolve_ns'
 // probes jar classpath entries via the vendored miniz reader (read_jar_entry,
-// in jar_reader.c), so an aliased/qualified/`:refer'-ed usage of a library or
-// `clojure.core' var gets the `:global-var' face once that jar is on the
-// classpath -- a jar entry is parsed and distilled once and cached as an
-// immutable FileNode.  (Jump-to-def *into* a jar entry still lands nowhere --
-// gracefully -- pending Elisp that opens the entry.)
+// in jar_reader.c), so jump-to-def on an aliased/qualified/`:refer'-ed usage of
+// a library or `clojure.core' var lands *inside the jar* -- a jar entry is
+// parsed and distilled once and cached as an immutable FileNode.
+// `treejure-definition' returns a location whose `:file' is the synthetic
+// "<jar>!<entry>" path, and Elisp opens it via `treejure-jar-entry' (a thin
+// accessor that re-reads the entry's source on demand).
 //
 // What is still deferred needs exhaustive knowledge of the whole closure, else
 // it false-positives: the `:unresolved' face and the dependency-reading Tier-2
@@ -95,23 +99,25 @@ int plugin_is_GPL_compatible;
 // ===========================================================================
 
 // Semantic face categories.  Only the categories treesit cannot express live
-// here.  Buffer-local analysis emits the local-* categories, same-namespace
-// `:global-var', `:special-form' (special forms + core macros) and
-// `:macro-invocation' (known non-core macros -- user def-forms); the full tier
-// adds cross-namespace `:global-var'.  `:unresolved' arrives with a later
-// cross-file slice (it needs exhaustive, jar-inclusive knowledge) and is listed
-// now so the contract is stable.
+// here.  Buffer-local analysis emits the local-* categories, `:special-form'
+// (special forms + core macros) and `:macro-invocation' (known non-core macros
+// -- user def-forms).  There is deliberately NO var face: a resolved var (same-
+// or cross-namespace) is left to the syntax layer (treesit already colors a
+// qualified symbol's namespace and the def-name forms), so the semantic overlay
+// paints only what treesit cannot -- locals, form heads, and (later)
+// `:unresolved'.  `:unresolved' arrives with a later cross-file slice (it needs
+// exhaustive, jar-inclusive knowledge) and is listed now so the contract is
+// stable.
 enum {
     CAT_LOCAL,             // a resolved local binding occurrence / usage
     CAT_LOCAL_UNUSED,      // a local binding never used in its scope (greyout)
-    CAT_GLOBAL_VAR,        // resolved current-ns / cross-ns / referred var
     CAT_SPECIAL_FORM,      // special form / core macro head (buffer-only)
     CAT_MACRO_INVOCATION,  // known non-core macro head (a user def-form)
     CAT_UNRESOLVED,        // symbol resolving to nothing                 (later)
     CAT__COUNT
 };
 static const char *const CATEGORY_NAMES[CAT__COUNT] = {
-    ":local", ":local-unused", ":global-var",
+    ":local", ":local-unused",
     ":special-form", ":macro-invocation", ":unresolved"
 };
 
@@ -494,50 +500,12 @@ static int kw_name_eq(const char *text, TSNode kw, const char *s) {
 // references); everything else is walked generically.
 // ===========================================================================
 
-// A per-analysis-pass memo of resolve_ns results: namespace name -> resolved
-// FileNode, or NULL cached too (a core/unresolved ns must not re-`stat' the
-// classpath for every usage of it).  FileNode pointers stay valid across further
-// indexing within a pass -- the objects are individually heap-allocated and a
-// dep is not re-indexed mid-pass -- so caching them here is safe.  Owned and
-// freed by analyze_file; lives exactly one full-tier pass.
-typedef struct {
-    char     **names;
-    FileNode **deps;
-    size_t     n, cap;
-} NsCache;
-
-static FileNode *ns_cache_lookup(NsCache *c, const char *ns, int *found) {
-    for (size_t i = 0; i < c->n; i++)
-        if (strcmp(c->names[i], ns) == 0) { *found = 1; return c->deps[i]; }
-    *found = 0;
-    return NULL;
-}
-
-static void ns_cache_store(NsCache *c, const char *ns, FileNode *dep) {
-    if (c->n == c->cap) {
-        c->cap = c->cap ? c->cap * 2 : 8;
-        c->names = realloc(c->names, c->cap * sizeof(char *));
-        c->deps  = realloc(c->deps,  c->cap * sizeof(FileNode *));
-    }
-    c->names[c->n] = strdup(ns);
-    c->deps[c->n]  = dep;
-    c->n++;
-}
-
-static void ns_cache_free(NsCache *c) {
-    for (size_t i = 0; i < c->n; i++) free(c->names[i]);
-    free(c->names); free(c->deps);
-    c->names = NULL; c->deps = NULL; c->n = c->cap = 0;
-}
-
 typedef struct {
     Workspace *ws;
     FileNode  *f;
     const char *text;
     Local     *locals; size_t nlocals, cap_locals;
     int        next_local_id;   // monotonic per file, assigned at each binding
-    int        cross_file;      // full tier: resolve + face cross-ns var usages
-    NsCache   *ns_cache;        // per-pass resolve_ns memo (NULL for point queries)
 } Analyzer;
 
 // Record a navigation occurrence.  NAME is duplicated for vars (NULL for
@@ -627,11 +595,6 @@ static void pop_scope(Analyzer *a, size_t mark) {
     a->nlocals = mark;
 }
 
-// The cross-file resolver primitive (defined with the workspace-model section):
-// resolve a qualified/`:refer'-ed symbol to its defining var on the classpath.
-static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
-                                      NsCache *cache, const VarDef **out);
-
 // --- `unused-namespace' / `unused-referred-var' usage tracking -------------
 // Buffer-determinable (no dependency I/O): the scope pass marks each require /
 // referred var as it sees a usage, and lint_unused_requires reports the rest at
@@ -674,20 +637,48 @@ static void mark_refer_used(NsIndex *ix, const char *name, size_t len) {
         }
 }
 
-// Resolve a reference symbol and record its navigation + semantic face:
-//   * a bare name matching a local (innermost first)  -> `:local'      + nav
-//   * a bare name matching an in-file var             -> `:global-var' + nav
+// Resolve a bare NAME[0,LEN) at byte span [SS,SE) that is NOT a local: an
+// in-file var (record a NAV_VAR usage so jump-to-def / find-references work) or
+// a `:refer'-ed var (mark it + its providing require used).  No face -- treesit
+// colors vars.  Shared by the normal resolver (resolve_ref) and the syntax-quote
+// walk (scan_syntax_quote): a syntax-quoted bare symbol auto-qualifies to a var
+// at read time (never to a local), so it counts as a var usage there too.
+static void resolve_bare_var(Analyzer *a, uint32_t ss, uint32_t se,
+                             const char *name, size_t len) {
+    NsIndex *ix = &a->f->index;
+    for (size_t v = 0; v < ix->n_vars; v++) {
+        if (strlen(ix->vars[v].name) == len &&
+            memcmp(ix->vars[v].name, name, len) == 0) {
+            push_nav(a->f, ss, se, NAV_VAR, -1, name, len, 0);
+            // An in-file def and a `:refer' of the same name collide in the
+            // global ns (ambiguous, unlike a lexical local shadow): count the
+            // occurrence as using the refer too, so the require is not falsely
+            // flagged unused (matching clj-kondo's leniency here).
+            mark_refer_used(ix, name, len);
+            return;
+        }
+    }
+    // Not an in-file var: a bare name may be a `:refer'-ed var -- count it as
+    // using that referred var + its providing require.
+    mark_refer_used(ix, name, len);
+}
+
+// Resolve a reference symbol, recording its navigation + (for locals) its face:
+//   * a bare name matching a local (innermost first)  -> `:local' face + nav
+//   * a bare name matching an in-file var             -> nav only (NAV_VAR)
 //   * a qualified `alias/name' / `the.ns/name', or a bare `:refer'-ed name,
-//     resolving to a real var on the classpath        -> `:global-var' (no nav)
+//     marks its namespace/referred-var used (for `unused-namespace')
 //
-// The same-namespace `:global-var' face is buffer-only (the file's own defs) and
-// painted at both tiers.  The cross-namespace face needs dependency I/O
-// (resolve_ns), so it is gated on `a->cross_file' -- at the fast after-edit tier
-// (cross_file == 0) resolve_ref reaches no resolve_ns call, keeping that tier
-// dep-free.  `:unresolved' is deliberately NOT painted: marking a symbol
-// unresolved needs exhaustive, jar-inclusive knowledge (else every core/library
-// var false-positives), which arrives with the jar slice.  Cross-namespace
-// usages get no NavRef -- jump-to-def resolves them live (resolve_cross_ns).
+// Resolved VARS get NO face: same- and cross-namespace var coloring is the
+// syntax layer's job (treesit colors a qualified symbol's namespace + the
+// def-name forms).  The semantic overlay paints only locals here.  This keeps
+// the scope pass entirely buffer-only -- it reaches NO resolve_ns call at either
+// tier, so it never does dependency I/O; cross-namespace resolution survives
+// only for the explicit jump-to-def point query (resolve_cross_ns).  In-file var
+// usages still get a NAV_VAR occurrence so jump-to-def / find-references work.
+// `:unresolved' is deliberately NOT painted: marking a symbol unresolved needs
+// exhaustive, jar-inclusive knowledge (else every core/library var
+// false-positives), which arrives with a later cross-file slice.
 static void resolve_ref(Analyzer *a, TSNode sym) {
     TSNode nm = field_name_node(sym);
     if (ts_node_is_null(nm)) return;
@@ -706,25 +697,8 @@ static void resolve_ref(Analyzer *a, TSNode sym) {
                 return;
             }
         }
-        // A var defined in this file: same-namespace `:global-var' (buffer-only)
-        // + an intra-file var usage (jump-to-def / find-references).
-        NsIndex *ix = &a->f->index;
-        for (size_t v = 0; v < ix->n_vars; v++) {
-            if (strlen(ix->vars[v].name) == len &&
-                memcmp(ix->vars[v].name, name, len) == 0) {
-                push_nav(a->f, ss, se, NAV_VAR, -1, name, len, 0);
-                push_span(a->f, ss, se, CAT_GLOBAL_VAR);
-                // An in-file def and a `:refer' of the same name collide in the
-                // global ns (ambiguous, unlike a lexical local shadow): count
-                // the occurrence as using the refer too, so the require is not
-                // falsely flagged unused (matching clj-kondo's leniency here).
-                mark_refer_used(ix, name, len);
-                return;
-            }
-        }
-        // Neither a local nor an in-file var: a bare name may be a `:refer'-ed
-        // var -- count it as using that referred var + its providing require.
-        mark_refer_used(ix, name, len);
+        // Not a local: an in-file var usage or a `:refer'-ed var (no face).
+        resolve_bare_var(a, ss, se, name, len);
     } else {
         // Qualified `q/name': the qualifier `q' (an alias, or a literal fully-
         // qualified ns) is a namespace usage -- mark it for `unused-namespace'.
@@ -733,12 +707,10 @@ static void resolve_ref(Analyzer *a, TSNode sym) {
             mark_ns_qualifier_used(&a->f->index, a->text + ts_node_start_byte(nsf),
                                    ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
     }
-    // Qualified, or a bare name that is neither local nor an in-file var: at the
-    // full tier, paint `:global-var' when it resolves cross-namespace to a real
-    // var (an alias/fqn `a/foo', or a `:refer'-ed bare `foo') via the classpath.
-    // A core / jar-backed / unresolved target simply gets no face (no warning).
-    if (a->cross_file && resolve_cross_ns_var(a->ws, a->f, sym, a->ns_cache, NULL))
-        push_span(a->f, ss, se, CAT_GLOBAL_VAR);
+    // No face for a resolved var (treesit colors it) and none for an unresolved
+    // one (that needs jar-inclusive knowledge -- a later slice).  Cross-namespace
+    // resolution happens only in jump-to-def (resolve_cross_ns), never here, so
+    // the scope pass stays buffer-only at both tiers.
 }
 
 // Forward declarations for the mutually-recursive walk.
@@ -1140,15 +1112,25 @@ static void scan_syntax_quote(Analyzer *a, TSNode node, int level) {
         return;
     }
     if (strcmp(t, "symbol") == 0) {
-        // A syntax-quoted qualified symbol namespace-resolves at read time, so
-        // its qualifier counts as a namespace usage (clj-kondo agrees), even
-        // though the symbol itself is templated data.
+        // A syntax-quoted symbol namespace-resolves at read time (clj-kondo
+        // agrees), even though the symbol itself is templated data:
+        //   * qualified `q/name'  -> its qualifier counts as a namespace usage;
+        //   * bare `name'         -> auto-qualifies to a var (an in-file var or a
+        //     `:refer'-ed one), so it counts as that var's usage -- recording a
+        //     NAV_VAR and keeping the require from a false `unused' flag.  It
+        //     never auto-qualifies to a local, so locals are not consulted here.
         if (sym_has_namespace(node)) {
             TSNode nsf = ts_node_child_by_field_name(node, "namespace", 9);
             if (!ts_node_is_null(nsf))
                 mark_ns_qualifier_used(&a->f->index,
                                        a->text + ts_node_start_byte(nsf),
                                        ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
+        } else {
+            TSNode nm = field_name_node(node);
+            if (!ts_node_is_null(nm))
+                resolve_bare_var(a, ts_node_start_byte(node), ts_node_end_byte(node),
+                                 a->text + ts_node_start_byte(nm),
+                                 ts_node_end_byte(nm) - ts_node_start_byte(nm));
         }
         return;
     }
@@ -1223,9 +1205,8 @@ static void analyze_node(Analyzer *a, TSNode node) {
             // non-core macro (a user-declared def-form) reads as
             // `:macro-invocation'; a special form / core macro reads as
             // `:special-form'.  Painting here -- and skipping the head when we
-            // walk the body below -- keeps it from also being resolved as a
-            // `:global-var' (a core macro like `when' resolves to clojure.core
-            // once that jar is on the classpath).
+            // walk the body below -- classifies it once, so a core form's head
+            // is never re-examined as a plain reference.
             int core = 0;
             if (is_extra_def_form(a->ws, a->text, head))
                 push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
@@ -1299,7 +1280,8 @@ static void collect_grammar_diags(FileNode *f, TSNode node) {
 // From that surface come the buffer-only linters that need no dependency I/O:
 // `duplicate-require`, `refer-all`, `namespace-name-mismatch`, `redefined-var`.
 // The cross-file slice (PLAN step 4) reuses the same `NsIndex` to build the
-// require graph and resolve `:global-var`/`:unresolved`.
+// require graph and resolve cross-namespace targets (jump-to-def; the
+// dependency-reading lints and the `:unresolved` face later).
 // ===========================================================================
 
 static char *node_text_dup(const char *text, TSNode n) {
@@ -1476,6 +1458,38 @@ static int ns_path_matches(const char *ns, const char *path) {
     return ok;
 }
 
+// Process one `:require`/`:use' spec, descending through a `reader_conditional'
+// (`#?' / `#?@') to the branch live for this file's dialect before flattening it
+// with parse_lib_spec -- so a require nested in a reader conditional is extracted
+// (and linted) like a plain one.  Honors exactly one branch (the file's platform
+// feature, or `:default'), the same single-branch rule the scope pass and var
+// extraction use; seeing a `:cljs'-only require from a `.clj'-dialect read is the
+// deferred per-dialect cljc slice (PLAN step 4).  A non-conditional spec goes
+// straight to parse_lib_spec.
+static void parse_require_spec(NsIndex *ix, const char *text, const char *path,
+                               TSNode spec, int from_use) {
+    TSNode u = unwrap_meta(spec);
+    if (ts_node_is_null(u)) return;
+    if (type_is(u, "reader_conditional")) {
+        TSNode branch = reader_conditional_branch(text, path, u);
+        if (ts_node_is_null(branch)) return;
+        TSNode marker = ts_node_child_by_field_name(u, "marker", 6);
+        if (!ts_node_is_null(marker) && type_is(marker, "marker_splicing")) {
+            // `#?@': the chosen branch is a vector whose ELEMENTS are each specs.
+            TSNode bv = unwrap_meta(branch);
+            if (type_is(bv, "vector_literal")) {
+                TSNode el;
+                for (uint32_t i = 0; !ts_node_is_null(el = nth_form(bv, i)); i++)
+                    parse_require_spec(ix, text, path, el, from_use);
+            }
+            return;
+        }
+        parse_require_spec(ix, text, path, branch, from_use);   // `#?': one spec
+        return;
+    }
+    parse_lib_spec(ix, text, u, NULL, from_use);
+}
+
 // Walk the `(ns ...)` form NS_LIST into F's NsIndex: record the ns name, check
 // the ns/path match, flatten its require/use specs, and emit the buffer-only
 // require diagnostics.
@@ -1505,7 +1519,7 @@ static void analyze_ns_form(FileNode *f, const char *text, TSNode ns_list) {
                     while (!ts_node_is_null(spec = nth_form(cu, j))) {
                         // skip trailing flag keywords (:reload, :verbose, ...)
                         if (!type_is(unwrap_meta(spec), "keyword"))
-                            parse_lib_spec(ix, text, spec, NULL, is_use);
+                            parse_require_spec(ix, text, f->path, spec, is_use);
                         j++;
                     }
                 }
@@ -1875,13 +1889,14 @@ static int span_cmp(const void *x, const void *y) {
 // and distilled once and cached as an immutable FileNode (jars do not change
 // within a session), keyed by a synthetic "<jar>!<entry>" path.
 //
-// First consumers: cross-namespace `treejure-definition' (see resolve_cross_ns)
-// and the scope pass's `:global-var' face both resolve an aliased/qualified or
-// `:refer'-ed var to its defining file via `resolve_ns' over the classpath --
-// now reaching library/`clojure.core' vars in jars, not just project sources.
-// (Jump-to-def *into* a jar entry needs Elisp that can open the entry; until
-// that slice a jar target paints a face but `M-.' lands nowhere -- gracefully.)
-// Cross-file lints/faces and find-usages build on the same primitives next.
+// Consumer: cross-namespace `treejure-definition' (see resolve_cross_ns)
+// resolves an aliased/qualified or `:refer'-ed var to its defining file via
+// `resolve_ns' over the classpath -- now reaching library/`clojure.core' vars in
+// jars, not just project sources.  Jump-to-def *into* a jar entry works: the
+// returned location's `:file' is the synthetic "<jar>!<entry>" path, which Elisp
+// opens via `treejure-jar-entry'.  (There is no var face -- treesit colors vars;
+// resolution here serves navigation only.)  The dependency-reading cross-file
+// lints/faces and find-usages build on the same primitives next.
 // ===========================================================================
 
 // The set of platforms a file participates in, as a bitmask.  `.cljc' counts as
@@ -2123,12 +2138,14 @@ static FileNode *resolve_ns(Workspace *ws, const char *const *dirs, size_t n_dir
     return NULL;
 }
 
-// Run the buffer-local analysis on F's current tree.  CROSS_FILE selects the
-// PLAN's two-tier check: the buffer-only facts below run at BOTH tiers and read
-// no dependencies; when CROSS_FILE is set (the full tier) the cross-file facts
-// -- :global-var/:unresolved faces and the Tier-2 dependency lints -- resolve
-// here against the workspace classpath (lazily, via resolve_ns).  Gating that
-// pass behind the flag is what keeps the after-edit fast tier free of disk I/O.
+// Run the buffer-local analysis on F's current tree.  Every fact computed here
+// is buffer-only and reads NO dependencies -- at either tier.  CROSS_FILE no
+// longer gates dependency I/O (the scope pass does none); it now selects only
+// the *cadence* of the buffer-determinable Tier-2 lints (`unused-namespace' /
+// `unused-referred-var'), emitted at the full tier so they do not flash on every
+// after-edit check.  Cross-file dependency resolution lives entirely in the
+// jump-to-def point query (resolve_cross_ns); the dependency-reading Tier-2
+// diagnostics that will reintroduce check-time dep I/O land in a later slice.
 static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
     filenode_clear_outputs(f);
     if (!f->tree) return;
@@ -2140,29 +2157,23 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
     extract_var_defs(ws, f, f->text, root, 1);   // live buffer: record def navs
     lint_redefined_var(f);
 
-    NsCache ns_cache = { 0 };     // per-pass resolve_ns memo (full tier only)
     Analyzer a = { .ws = ws, .f = f, .text = f->text,
                    .locals = NULL, .nlocals = 0, .cap_locals = 0,
-                   .next_local_id = 0, .cross_file = cross_file,
-                   .ns_cache = &ns_cache };
+                   .next_local_id = 0 };
     analyze_body(&a, root, 0);   // top level: every form is a reference context
     free(a.locals);
-    ns_cache_free(&ns_cache);
 
-    // --- Cross-file facts (full tier only; resolves deps lazily) -----------
-    // The `:global-var' face is already emitted by the scope pass above: same-
-    // namespace var usages at both tiers, and -- gated on `cross_file' inside
-    // resolve_ref -- cross-namespace usages that resolve via the classpath.
+    // --- Full-tier-only facts (still buffer-only; cadence, not I/O) --------
     if (cross_file) {
-        // `unused-namespace' / `unused-referred-var': buffer-determinable, so it
-        // needs no dependency I/O -- the scope pass already flagged each used
-        // require / referred var above.  Emitted only here (not the fast tier)
-        // so it tracks the PLAN's Tier-2 cadence and does not flash on edit.
+        // `unused-namespace' / `unused-referred-var': buffer-determinable -- the
+        // scope pass already flagged each used require / referred var above, so
+        // this reads no dependencies.  Emitted only here (not the fast tier) so
+        // it tracks the PLAN's Tier-2 cadence and does not flash on edit.
         lint_unused_requires(f);
         // Remaining Tier-2 work attaches here: the `:unresolved' face and the
         // dependency lints that DO need disk reads (unresolved-namespace,
         // undefined var, ...).  Those need exhaustive, jar-inclusive knowledge
-        // to avoid false positives, so they land with the jar slice (PLAN step 4).
+        // to avoid false positives, so they land with a later slice (PLAN step 4).
     }
 
     if (f->nspans > 1)
@@ -2270,14 +2281,13 @@ static emacs_value diagnostics_to_lisp(emacs_env *env, FileNode *f) {
 }
 
 // (treejure-check-buffer WS FILE LIVE-TEXT CROSS-FILE-P) -> diagnostics.
-// Incremental reparse + grammar diagnostics + buffer-local scope pass, then --
-// when CROSS-FILE-P is non-nil (the full tier) -- the cross-file facts.  The
-// flag is routed to analyze_file, which runs the buffer-only facts at both
-// tiers and gates the full-tier pass behind it so the after-edit fast tier
-// never does dependency I/O.  The full tier already differs from the fast tier:
-// it paints cross-namespace `:global-var' faces (slices 4b/4c) and emits the
-// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires).
-// The dependency-reading Tier-2 lints/faces are still later slices (PLAN step 4).
+// Incremental reparse + grammar diagnostics + buffer-local scope pass.  The
+// CROSS-FILE-P flag is routed to analyze_file; both tiers are buffer-only (no
+// dependency I/O), and the flag now selects only the cadence of the full tier's
+// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires)
+// so they do not flash on edit.  The dependency-reading Tier-2 lints/faces and
+// the `:unresolved' face are still later slices (PLAN step 4), and will be what
+// reintroduces check-time dependency I/O.
 static emacs_value f_check_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
     Workspace *ws = env->get_user_ptr(env, args[0]);
     if (!ws) return Qnil(env);
@@ -2364,15 +2374,14 @@ static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
 // Resolve the cross-namespace var named by SYM -- a qualified `alias/name' (or
 // fully-qualified `the.ns/name') or a bare `:refer'-ed `name' -- against F's
 // aliases/refers and WS's classpath (source directories and jars alike).  Reads
-// the dependency lazily (resolve_ns), exactly at the query/check
-// that needs it.  Returns the defining FileNode and, via OUT (when non-NULL),
-// its VarDef; NULL when SYM does not resolve to a real var.  *OUT points into
-// the dep's var array, valid until the next indexing call -- use it at once.
-// Shared by `treejure-definition' (-> a location, CACHE == NULL: one query) and
-// the scope pass's `:global-var' face (-> existence only, OUT == NULL, CACHE set
-// so the same target ns is resolved at most once per pass).
+// the dependency lazily (resolve_ns), exactly at the query that needs it.
+// Returns the defining FileNode and, via OUT (when non-NULL), its VarDef; NULL
+// when SYM does not resolve to a real var.  *OUT points into the dep's var
+// array, valid until the next indexing call -- use it at once.  The sole caller
+// is `treejure-definition' (jump-to-def): a single point query, so there is no
+// per-pass memo -- each call resolves at most one namespace.
 static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
-                                      NsCache *cache, const VarDef **out) {
+                                      const VarDef **out) {
     TSNode nmf = field_name_node(sym);
     if (ts_node_is_null(nmf)) return NULL;
     uint32_t na = ts_node_start_byte(nmf), nb = ts_node_end_byte(nmf);
@@ -2420,16 +2429,10 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
         return NULL;
     }
 
-    FileNode *dep;
-    int found = 0;
-    if (cache) dep = ns_cache_lookup(cache, target_ns, &found);
-    if (!found) {
-        dep = resolve_ns(ws, (const char *const *)ws->classpath,
-                         ws->n_classpath, target_ns,
-                         dialect_mask(f->path), f->path);
-        if (cache) ns_cache_store(cache, target_ns, dep);
-    }
-    free(lit);                         // resolve_ns / ns_cache_store copied it
+    FileNode *dep = resolve_ns(ws, (const char *const *)ws->classpath,
+                               ws->n_classpath, target_ns,
+                               dialect_mask(f->path), f->path);
+    free(lit);                         // resolve_ns copied what it needed
     if (!dep) return NULL;
     for (size_t v = 0; v < dep->index.n_vars; v++)
         if (strlen(dep->index.vars[v].name) == nlen &&
@@ -2445,7 +2448,7 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
 static emacs_value resolve_cross_ns(emacs_env *env, Workspace *ws,
                                     FileNode *f, TSNode sym) {
     const VarDef *vd = NULL;
-    FileNode *dep = resolve_cross_ns_var(ws, f, sym, NULL, &vd);
+    FileNode *dep = resolve_cross_ns_var(ws, f, sym, &vd);
     if (!dep || !vd) return Qnil(env);
     return location_to_lisp(env, dep, vd->name_start, vd->name_end);
 }
@@ -2454,7 +2457,9 @@ static emacs_value resolve_cross_ns(emacs_env *env, Workspace *ws,
 // In-file first (cached analysis): a local usage -> its binding; a same-ns var
 // usage -> its definition.  Otherwise cross-namespace: an aliased/qualified or
 // `:refer'-ed var -> its def in the resolved dependency (lazy, via the
-// classpath).  A core/unresolved/jar-backed target yields nil.
+// classpath).  A core/unresolved target yields nil; a jar-backed target yields a
+// location whose `:file' is the synthetic "<jar>!<entry>" path, which Elisp
+// opens via `treejure-jar-entry'.
 static emacs_value f_definition(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
     Workspace *ws = env->get_user_ptr(env, args[0]);
     if (!ws) return Qnil(env);
@@ -2532,6 +2537,29 @@ static emacs_value f_close_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value a
     return Qnil(env);
 }
 
+// (treejure-jar-entry JAR ENTRY) -> string | nil.  Read ENTRY's bytes from the
+// jar at JAR via the vendored miniz reader so Elisp can OPEN a jar-backed
+// jump-to-def target.  The entry's text is dropped from the cached FileNode
+// after its surface is distilled, so it is re-read here on demand -- jars are
+// immutable per session, so there is no staleness.  Returns the UTF-8 source as
+// a Lisp string, or nil when the entry is absent or not valid UTF-8
+// (`make_string' requires valid UTF-8).  Workspace-independent: a pure jar read,
+// needing no FileNode -- the synthetic "<jar>!<entry>" path carries everything.
+static emacs_value f_jar_entry(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
+    size_t jlen; char *jar = copy_lisp_string(env, args[0], &jlen);
+    if (!jar) return Qnil(env);
+    size_t elen; char *entry = copy_lisp_string(env, args[1], &elen);
+    if (!entry) { free(jar); return Qnil(env); }
+    size_t len; char *buf = read_jar_entry(jar, entry, &len);
+    free(jar); free(entry);
+    if (!buf) return Qnil(env);
+    emacs_value res = is_valid_utf8(buf, len)
+        ? env->make_string(env, buf, (ptrdiff_t)len)
+        : Qnil(env);
+    free(buf);
+    return res;
+}
+
 // (treejure-set-def-forms WS NAMES) -> nil.  NAMES is a list/vector of macro
 // name strings analysed like `defn` (the `replique-clojure-extra-def-forms`).
 static emacs_value f_set_def_forms(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
@@ -2585,6 +2613,7 @@ int emacs_module_init(struct emacs_runtime *ert) {
     bind_fn(env, "treejure-definition",      3, 3, f_definition);
     bind_fn(env, "treejure-references",      3, 4, f_references);
     bind_fn(env, "treejure-close-buffer",    2, 2, f_close_buffer);
+    bind_fn(env, "treejure-jar-entry",       2, 2, f_jar_entry);
     bind_fn(env, "treejure-set-def-forms",   2, 2, f_set_def_forms);
     bind_fn(env, "treejure-category-names",  0, 0, f_category_names);
     bind_fn(env, "treejure-diagnostic-ids",  0, 0, f_diagnostic_ids);

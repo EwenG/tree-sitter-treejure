@@ -1,89 +1,87 @@
 (ns manualtest.global-vars
   (:require [manualtest.nav-target :as nt :refer [greet]]
-            ;; `clojure.string` lives in a jar, so it does NOT resolve yet —
-            ;; usages through `s/...` stay unpainted (see section 4).
             [clojure.string :as s]))
 
 ;; ===========================================================================
-;; :global-var faces — var USAGES that positively resolve.
+;; The var-face decision — vars carry NO semantic face.
 ;;
-;; The face (default `font-lock-variable-name-face`) marks a symbol that the
-;; module resolves to a real var.  Two flavours, on two cadences:
+;; There is deliberately no `:global-var' (or any var) face: a resolved var,
+;; same- or cross-namespace, is colored by the treesit SYNTAX layer (it already
+;; faces a qualified symbol's namespace and the def-name forms).  The semantic
+;; overlay paints only what treesit cannot — `:local' bindings + their usages,
+;; the `:special-form'/`:macro-invocation' form heads, and (later) `:unresolved'.
 ;;
-;;   * SAME-NAMESPACE usages (this file's own defs) are painted on the FAST
-;;     tier — immediately, as you type (after the short idle debounce).
-;;   * CROSS-NAMESPACE usages (aliased / fully-qualified / `:refer`-ed) are
-;;     painted on the FULL tier only — after `save`, switching to/from the
-;;     buffer, or `M-.`.  So: edit, then `C-x C-s`, to see them appear.
-;;
-;; A core / library / jar-backed symbol gets NO face — that is not a false
-;; report, just "not resolved yet" (the same boundary as `M-.` jump-to-def).
-;; A binding NAME at its def site is never painted (treesit already faces it).
+;; So what to watch here is the ABSENCE of a var face plus the presence of the
+;; `:local' face — the locals stand out precisely because vars around them are
+;; left to treesit.  Var usages still resolve under the hood (that drives `M-.';
+;; see navigation.clj) — resolution just no longer drives a face.
 ;; ===========================================================================
 
 
 ;; ---------------------------------------------------------------------------
-;; 1. Same-namespace vars (FAST tier — appear immediately on edit).
+;; 1. Same-namespace vars — no semantic face; locals are faced.
 ;; ---------------------------------------------------------------------------
 
-;; The def NAME `base-url` here is NOT :global-var (treesit faces a def name).
+;; The def NAME `base-url` is treesit-faced (a def name); no semantic overlay.
 (def base-url "https://example.com")
 
-;; Both `base-url` usages below ARE :global-var.  `path` is a param → :local,
-;; NOT :global-var (locals win; resolution is by identity, not by text).
+;; Both `base-url` usages below get NO semantic face (treesit colors them).
+;; `path` is a param → `:local' (faced), and locals win by identity anyway.
 (defn endpoint [path]
   (str base-url path))
 
-;; `endpoint` here is :global-var (a same-ns defn usage).  `str` is core → no
-;; face.  `n` is :local.
+;; `endpoint` here is a same-ns var usage → no face.  `str` is core → no face.
+;; `n` is `:local'.
 (defn endpoints [n]
   (endpoint (str "/page/" n)))
 
 
 ;; ---------------------------------------------------------------------------
-;; 2. Local SHADOWS a var name — the inner use is :local, not :global-var.
+;; 2. Local SHADOWS a var name — the inner use IS faced (`:local').
 ;; ---------------------------------------------------------------------------
 
 ;; `base-url` is also a var (section 1).  Inside the `let` it is rebound as a
-;; LOCAL, so the `base-url` in the body is :local (greenish), NOT :global-var.
-;; This is the identity check: same text, different binding.
+;; LOCAL, so the `base-url` in the body is `:local' (faced) — the one case where
+;; a name that elsewhere reads as a var is painted, because here it is a local.
+;; The identity check: same text, different binding.
 (defn shadowing []
   (let [base-url "http://localhost"]
     base-url))
 
 
 ;; ---------------------------------------------------------------------------
-;; 3. Cross-namespace vars (FULL tier — save the buffer to see these paint).
+;; 3. Cross-namespace vars — still no face; `M-.' resolves them (full tier).
 ;;    All resolve into nav_target.clj under the `src` source dir.
 ;; ---------------------------------------------------------------------------
 
-;; Aliased: `nt/greet` is :global-var (the whole `nt/greet` symbol).
+;; Aliased `nt/greet`, fully-qualified `manualtest.nav-target/max-size`, and the
+;; `:refer'-ed bare `greet' all RESOLVE (jump-to-def lands in nav_target.clj),
+;; but none gets a semantic face — treesit colors the namespace part.
 (defn aliased-call []
   (nt/greet "world"))
 
-;; Fully-qualified: the whole `manualtest.nav-target/max-size` is :global-var.
 (defn qualified-call []
   (* 2 manualtest.nav-target/max-size))
 
-;; `:refer`-ed bare name: `greet` is :global-var.
 (defn referred-call []
   (greet "there"))
 
 
 ;; ---------------------------------------------------------------------------
-;; 4. What does NOT get a :global-var face (negative cases — no face, no warning).
+;; 4. Negative cases — also no face (and no warning yet).
 ;; ---------------------------------------------------------------------------
 
-;; Core vars (`+`, `inc`, `str`) → no face: they live in jars.
+;; Core vars (`+`, `inc`, `str`) → no face.
 (defn core-symbols [x]
   (+ (inc x) (str x)))
 
-;; Jar-backed alias: `s/upper-case` → no face (`clojure.string` is a jar).
+;; Jar-backed alias `s/upper-case` → no face (and, without a jar on the
+;; classpath, does not resolve for `M-.' either; see jar_resolution.clj).
 (defn jar-alias [x]
   (s/upper-case x))
 
 ;; Resolves the NS but the var does not exist there → no face (and, by design,
-;; no `unresolved`/`undefined-var` warning yet — that needs the jar slice).
+;; no `unresolved`/`undefined-var` warning yet — that needs the dep-reading slice).
 (defn missing-var [x]
   (nt/does-not-exist x))
 

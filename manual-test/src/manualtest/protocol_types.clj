@@ -2,15 +2,16 @@
 
 ;; ===========================================================================
 ;; Secondary var interning — the vars a def-form generates BEYOND its primary
-;; name, for clj-kondo `:analysis` parity.  Each resolves same-namespace, so its
-;; usages get the `:global-var` face (fast tier) and `M-.` / `M-?` work on them:
+;; name, for clj-kondo `:analysis` parity.  Each resolves same-namespace, so
+;; `M-.` / `M-?` work on its usages (interning is what navigation needs):
 ;;
 ;;   * defprotocol / definterface → one var per METHOD name;
 ;;   * deftype  → the positional factory `->Name`;
 ;;   * defrecord → `->Name` AND the map factory `map->Name`.
 ;;
-;; The def NAME at each site is treesit-faced (a function/type name), not the
-;; semantic overlay; only the USAGES below are `:global-var`.
+;; No semantic var face (treesit colors the names + usages); the point here is
+;; that the secondary vars are interned, so jump-to-def / find-references reach
+;; the USAGES below.
 ;; ===========================================================================
 
 
@@ -21,7 +22,7 @@
   (area [this] "the shape's area")
   (perimeter [this]))
 
-;; `area` and `perimeter` here are same-ns var usages → `:global-var`; `M-.`
+;; `area` and `perimeter` here are same-ns var usages (no face); `M-.`
 ;; lands on their method signatures above, `M-?` lists the sig + this usage.
 ;; `s` is a :local.
 (defn describe [s]
@@ -32,7 +33,7 @@
 
 (defrecord Circle [radius])
 
-;; Both factory usages resolve same-ns → `:global-var`; `M-.` lands on the
+;; Both factory usages resolve same-ns (no face); `M-.` lands on the
 ;; defrecord form.  `r` is a :local.
 (defn make-circle [r]
   [(->Circle r) (map->Circle {:radius r})])
@@ -42,7 +43,7 @@
 
 (deftype Point [x y])
 
-;; `->Point` resolves same-ns → `:global-var`; `M-.` lands on the deftype.
+;; `->Point` resolves same-ns (no face); `M-.` lands on the deftype.
 (defn origin []
   (->Point 0 0))
 
