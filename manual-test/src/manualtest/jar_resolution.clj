@@ -55,10 +55,16 @@
   (map inc (str xs)))
 
 ;; Resolves the jar NS but the var does not exist there → `M-.' finds nothing,
-;; and (by design) no `unresolved`/`undefined-var` warning yet.
+;; and — once the jar is on the classpath (`manualtest-jar-check`) — an
+;; `undefined-var' WARNING: clojure.string resolved, so the missing var is real.
+;; `undefined-var' is NOT gated (it only ever checks a resolved dep), so it fires
+;; here even though the classpath is not marked complete.
 (defn missing-in-jar [s]
   (str/this-does-not-exist s))
 
-;; A bare symbol that is neither local, in-file, nor `:refer`-ed → no face.
+;; A bare symbol that is neither local, in-file, nor `:refer`-ed → an
+;; `:unresolved' candidate.  No face under `manualtest-jar-check' (that face is
+;; gated on a complete classpath, which jar-check does not set); it would paint
+;; under `complete-classpath-manual-test.el'.
 (defn undefined-symbol [x]
   (totally-undefined x))

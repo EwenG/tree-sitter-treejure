@@ -68,23 +68,41 @@
 
 
 ;; ---------------------------------------------------------------------------
-;; 4. Negative cases — also no face (and no warning yet).
+;; 4. The dependency-reading Tier-2 facts (full tier).
+;;
+;; `undefined-var` fires whenever a require RESOLVED to a dependency that does
+;; not define the var — so it is on regardless of classpath completeness (a
+;; resolved dep's surface is authoritative).  `unresolved-namespace` and the
+;; `:unresolved` FACE need an exhaustive, jar-inclusive classpath to avoid false
+;; positives (a library require is an unavoidable NULL edge, a bare core var
+;; lives in a jar), so they are gated on a "classpath-complete" workspace — off
+;; under the interim source-dirs-only classpath, on once the JVM oracle supplies
+;; the full classpath (PLAN step 6).
 ;; ---------------------------------------------------------------------------
 
-;; Core vars (`+`, `inc`, `str`) → no face.
+;; Core vars (`+`, `inc`, `str`) → no `undefined-var` (clojure.core is a jar:
+;; under the interim classpath its require is a NULL edge so these are skipped;
+;; under a complete classpath they resolve into the jar).  No `:unresolved` face
+;; either — gated off interim, and resolved (so still none) on a complete one.
 (defn core-symbols [x]
   (+ (inc x) (str x)))
 
-;; Jar-backed alias `s/upper-case` → no face (and, without a jar on the
-;; classpath, does not resolve for `M-.' either; see jar_resolution.clj).
+;; Jar-backed alias `s/upper-case` → clojure.string is a jar; under the interim
+;; classpath its require is a NULL edge so NO `undefined-var` fires, and under a
+;; complete classpath it resolves into the jar (var present) — clean either way.
 (defn jar-alias [x]
   (s/upper-case x))
 
-;; Resolves the NS but the var does not exist there → no face (and, by design,
-;; no `unresolved`/`undefined-var` warning yet — that needs the dep-reading slice).
+;; Resolves the NS (`manualtest.nav-target` is a project source under `src`) but
+;; the var does not exist there → `UNDEFINED-VAR` warning on `nt/does-not-exist`
+;; (a resolved dep that lacks the var — fires under any classpath).  With a
+;; complete classpath it also gets the `:unresolved` face.
 (defn missing-var [x]
   (nt/does-not-exist x))
 
-;; A bare symbol that is neither local, in-file, nor referred → no face.
+;; A bare symbol that is neither local, in-file, nor referred → an `:unresolved`
+;; candidate.  No warning; the `:unresolved` FACE appears only on a complete
+;; classpath (interim, it could still be a core/library var, so it is left
+;; unpainted to stay false-positive-free).
 (defn undefined-symbol [x]
   (totally-undefined x))

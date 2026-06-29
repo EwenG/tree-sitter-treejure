@@ -44,17 +44,29 @@ Things to watch:
     (binding + usages) or same-ns var (def + usages). Var references are
     **buffer-scoped** for now (project-wide find-usages is a later slice).
 
-What the module does **not** do yet (so don't expect it): the **dependency-
-reading** cross-file *diagnostics* — undefined-var, unresolved-namespace, arity
-checks — and the `:unresolved` *face*; and project-wide find-usages. Those need
-the rest of the cross-file workspace tier (PLAN step 4+).
-(`unused-namespace`/`unused-referred-var` **are** done — they need no dependency
-reads.)
+- **Dependency-reading diagnostics** (full tier — save / buffer-switch / `M-.`),
+  which read the require graph:
+  - `undefined-var` — a qualified (`a/foo`) or `:refer`-ed var whose namespace
+    **resolved** to a dependency that does not define it. **Not gated**: it only
+    fires on a require that actually resolved (a project source under `src`), so
+    it works on your own files right now; a `clojure.*` require is a NULL edge
+    here and is skipped, never mis-flagged. See `undefined_vars.clj`.
+  - `unresolved-namespace` (a require that resolves to nothing) and the
+    `:unresolved` **face** (→ `replique-clojure-unresolved-face`, default the
+    warning face — on a bare symbol that resolves to nothing, and on an
+    undefined-var occurrence). These need an exhaustive, jar-inclusive classpath
+    to avoid false positives, so they are **gated OFF** under the interim
+    source-dirs-only classpath (the JVM oracle supplies the real one later, PLAN
+    step 6). Flip the gate by hand with `complete-classpath-manual-test.el` (`M-x
+    manualtest-complete-check`); see `unresolved.clj`.
 
-The forward **require graph** *is* built now (full tier — save / buffer-switch /
-`M-.`): each require is resolved to its dependency file over the classpath. It is
-the seed the dependency-reading diagnostics above will read, so it has **no
-visible effect yet** (no diagnostic, no face). Inspect it from a manual-test
+What the module does **not** do yet (so don't expect it): cross-file **arity**
+checks, and project-wide **find-usages** (`M-?` is buffer-scoped for now). Those
+need later slices (PLAN step 4+/5).
+
+The forward **require graph** is built at the full tier (save / buffer-switch /
+`M-.`): each require is resolved to its dependency file over the classpath — the
+seed the dependency-reading diagnostics above read. Inspect it from a manual-test
 buffer with `(treejure-requires replique-clojure--ws replique-clojure--file-id)`
 — each require comes back as `(:ns NS :file PATH-or-nil)`; sibling `manualtest.*`
 namespaces resolve to their source file, library `clojure.*` requires are `nil`
@@ -96,6 +108,8 @@ slice.)
 | `src/manualtest/navigation.clj`     | `xref` `M-.` / `M-?`: locals, same-ns vars, cross-file (aliased/qualified/`:refer`-ed) jump-to-def |
 | `src/manualtest/nav_target.clj`     | the cross-file jump **target** for `navigation.clj` + `defmethods.clj` (open only to confirm jumps arrive) |
 | `src/manualtest/jar_resolution.clj` | **jar-backed** jump-to-def (clojure.string/clojure.set); needs `jar-manual-test.el` (`M-x manualtest-jar-check`) to put a jar on the classpath |
+| `src/manualtest/undefined_vars.clj` | `undefined-var` (**not gated** — works on save now): a qualified/`:refer`-ed var whose RESOLVED project dep (`nav_target.clj`) lacks it, vs. resolved / core / jar / local negatives |
+| `src/manualtest/unresolved.clj`     | the **gated** `:unresolved` face + `unresolved-namespace` (OFF by default; `M-x manualtest-complete-check` via `complete-classpath-manual-test.el` flips the gate), with the face's conservative negatives (core/interop/`%`/resolved) |
 
 To try the **jar slice** in-editor, open `jar_resolution.clj`, then
 `M-x load-file RET jar-manual-test.el RET` and `M-x manualtest-jar-check` — it
@@ -105,6 +119,18 @@ classpath, `M-.` on a jar var (e.g. `str/upper-case`) now also navigates into
 the jar entry's source (`clojure/string.clj`), opened read-only. `M-x
 manualtest-jar-reset` drops it again. (This is bench-only scaffolding for the
 gap until the JVM oracle supplies the real jar classpath.)
+
+To try the **gated dependency-reading facts** (the `:unresolved` face and
+`unresolved-namespace`), open `unresolved.clj`, then `M-x load-file RET
+complete-classpath-manual-test.el RET` and `M-x manualtest-complete-check` — it
+rebuilds that buffer's workspace with a real `clojure-*.jar` on the classpath
+**and** the `classpath-complete` flag set (`treejure-init`'s 3rd argument),
+re-checks, and the gated facts light up: the face paints `totally-undefined` /
+`another-missing`, and the `manualtest.no-such-ns` require is underlined, while
+core / interop / resolved references stay clean. `M-x manualtest-complete-reset`
+returns to the interim (gated-off) workspace. (`undefined-var` needs none of
+this — it is ungated; see `undefined_vars.clj`.) Bench-only scaffolding for the
+gap until the oracle supplies the real classpath.
 
 `.dir-locals.el` sets `replique-clojure-extra-def-forms` to `("defroute"
 "defcomponent")` for this project; the semantic layer analyses those macros
