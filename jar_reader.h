@@ -14,4 +14,12 @@
 // the Emacs boundary, so it can later run off the main thread.
 char *read_jar_entry(const char *jar_path, const char *entry, size_t *len);
 
+// List the file entries of the zip/jar at JAR_PATH: returns a freshly malloc'd
+// array of *N_ENTRIES freshly malloc'd, NUL-terminated entry names (directories
+// excluded), or NULL (with *N_ENTRIES = 0) if the jar cannot be opened.  Reads
+// only the central directory, no entry data.  The caller owns the result and
+// frees each name and the array with plain `free`.  Lets the module cache a
+// jar's directory once so repeated namespace probes need no further jar I/O.
+char **jar_list_entries(const char *jar_path, size_t *n_entries);
+
 #endif // TREEJURE_JAR_READER_H

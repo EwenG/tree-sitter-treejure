@@ -51,6 +51,16 @@ the rest of the cross-file workspace tier (PLAN step 4+).
 (`unused-namespace`/`unused-referred-var` **are** done — they need no dependency
 reads.)
 
+The forward **require graph** *is* built now (full tier — save / buffer-switch /
+`M-.`): each require is resolved to its dependency file over the classpath. It is
+the seed the dependency-reading diagnostics above will read, so it has **no
+visible effect yet** (no diagnostic, no face). Inspect it from a manual-test
+buffer with `(treejure-requires replique-clojure--ws replique-clojure--file-id)`
+— each require comes back as `(:ns NS :file PATH-or-nil)`; sibling `manualtest.*`
+namespaces resolve to their source file, library `clojure.*` requires are `nil`
+until a jar is on the classpath (`M-x manualtest-jar-check`, then they resolve to
+a `jar!entry` path).
+
 **Jar-backed resolution** now exists in the C module (the jar slice: it reads
 `clojure.core` / library namespaces out of jars on the classpath), but this
 bench does **not** exercise it by default: the interim Elisp classpath seeds

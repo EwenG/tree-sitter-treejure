@@ -43,3 +43,28 @@ char *read_jar_entry(const char *jar_path, const char *entry, size_t *len) {
     mz_free(p);
     return buf;
 }
+
+char **jar_list_entries(const char *jar_path, size_t *n_entries) {
+    *n_entries = 0;
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof zip);
+    // Reads + validates the central directory only (no entry data extracted).
+    if (!mz_zip_reader_init_file(&zip, jar_path, 0)) return NULL;
+
+    mz_uint n = mz_zip_reader_get_num_files(&zip);
+    char **names = n ? malloc((size_t)n * sizeof(char *)) : NULL;
+    size_t got = 0;
+    if (names) {
+        for (mz_uint i = 0; i < n; i++) {
+            if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+            size_t l = strlen(st.m_filename);
+            char *dup = malloc(l + 1);
+            if (dup) { memcpy(dup, st.m_filename, l + 1); names[got++] = dup; }
+        }
+    }
+    mz_zip_reader_end(&zip);
+    *n_entries = got;
+    return names;
+}

@@ -56,14 +56,20 @@ int plugin_is_GPL_compatible;
 // There is deliberately NO var face.  A resolved var -- same- or cross-namespace
 // -- is left to the syntax layer: treesit already colors a qualified symbol's
 // namespace and the def-name forms, so the semantic overlay paints only what
-// treesit cannot (locals + form heads).  This keeps the whole scope pass
-// buffer-only: it reaches no `resolve_ns' call at either tier and so does NO
-// dependency I/O; cross-namespace resolution survives only for the jump-to-def
-// point query.  The full tier still emits the `unused-namespace' /
+// treesit cannot (locals + form heads).  The scope pass stays buffer-only: it
+// reaches no `resolve_ns' call at either tier and does NO dependency I/O;
+// cross-namespace resolution survives only for the jump-to-def point query and
+// the require graph (below).  The full tier emits the `unused-namespace' /
 // `unused-referred-var' Tier-2 lints (lint_unused_requires) -- buffer-
 // determinable from the require pass's alias/refer maps + the scope pass's usage
-// marking, so they too read no dependencies (clj-kondo parity).  The full-tier
-// flag now selects only that lint *cadence*, not dependency I/O.
+// marking, so they too read no dependencies (clj-kondo parity).
+//
+// The FULL tier also builds the forward **require graph** (build_require_graph):
+// it resolves each of the file's requires to its dependency FileNode over the
+// classpath via `resolve_ns' -- the first **check-time dependency I/O** (the fast
+// tier stays dep-I/O-free).  This emits no diagnostic; an unresolved require just
+// leaves a NULL edge.  `treejure-requires' exposes the edges; the
+// dependency-reading Tier-2 *warning* lints read them next (see below).
 //
 // The head of every list form is also classified, buffer-only: a special form
 // or core macro gets `:special-form', and a *known* non-core macro (a
@@ -154,6 +160,10 @@ static const char *const SEVERITY_NAMES[] = { ":warning", ":error" };
 // Small growable arrays.
 // ===========================================================================
 
+// Forward declaration: a ReqSpec carries a forward require-graph edge to its
+// resolved dependency FileNode (defined below).
+typedef struct FileNode FileNode;
+
 typedef struct {
     uint32_t start, end;
     int category;
@@ -202,6 +212,14 @@ typedef struct {
     int      has_alias;   // saw a real `:as' (loads the ns) -> warn if unused
     int      has_refer_vec; // saw `:refer [..]'/`:only [..]' -> warn if unused
     int      used;        // some usage referenced this ns (alias/fq/refer/`::')
+    // Forward require-graph edge: the dependency FileNode `resolve_ns' found for
+    // this require over the classpath (a source file or a jar entry), or NULL
+    // when unresolved.  Set at the FULL tier only (build_require_graph); NULL at
+    // the fast tier (the graph is a full-tier product) and after a fresh parse.
+    // A BORROWED pointer -- the node is owned by `ws->files' (interned for the
+    // session, never freed or moved until the workspace finalizer), so it stays
+    // valid across checks; nsindex_clear must NOT free it.
+    FileNode *resolved;
 } ReqSpec;
 
 // One var defined in the file (the public/private surface).  Cross-file
@@ -246,7 +264,7 @@ typedef struct {
 // cross-file fields (mtime, kind) arrive with the workspace-model slice.
 // ===========================================================================
 
-typedef struct {
+struct FileNode {
     char     *path;      // owned key (absolute file path)
     TSTree   *tree;      // NULL until first parse
     char     *text;      // last-parsed bytes (NUL-terminated copy), or NULL
@@ -264,14 +282,93 @@ typedef struct {
     size_t        ndiags, cap_diags;
     NavRef       *navs;  // navigation occurrences (locals + same-ns vars)
     size_t        nnavs, cap_navs;
-} FileNode;
+};
+
+// ===========================================================================
+// StrMap -- a tiny path -> pointer hash (open addressing, FNV-1a, power-of-two
+// table, linear probing).  Indexes `ws->files' by path and `ws->jar_dirs' by
+// jar path, replacing the former linear scans.  Insert + lookup + iterate only;
+// an entry is NEVER removed (a FileNode lives for the session -- close-buffer
+// reverts it but keeps it), so there is no tombstone logic.  Keys are BORROWED
+// -- they point into the stored object (a FileNode's `path' / a JarDir's
+// `jar_path', both `strdup'-ed once and stable for the session) -- so the map
+// frees only its slot array, never the keys.
+// ===========================================================================
+
+typedef struct { const char *key; void *val; } MapSlot;
+typedef struct { MapSlot *slots; size_t cap, count; } StrMap;
+
+static uint64_t fnv1a(const char *s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void strmap_grow(StrMap *m) {
+    size_t ncap = m->cap ? m->cap * 2 : 16;
+    MapSlot *ns = calloc(ncap, sizeof(MapSlot));
+    for (size_t i = 0; i < m->cap; i++)
+        if (m->slots[i].key) {
+            size_t j = fnv1a(m->slots[i].key) & (ncap - 1);
+            while (ns[j].key) j = (j + 1) & (ncap - 1);
+            ns[j] = m->slots[i];
+        }
+    free(m->slots);
+    m->slots = ns;
+    m->cap = ncap;
+}
+
+// Insert KEY->VAL (KEY borrowed, must outlive the map).  Grows at 0.7 load.
+static void strmap_put(StrMap *m, const char *key, void *val) {
+    if ((m->count + 1) * 10 >= m->cap * 7) strmap_grow(m);
+    size_t j = fnv1a(key) & (m->cap - 1);
+    while (m->slots[j].key) {
+        if (strcmp(m->slots[j].key, key) == 0) { m->slots[j].val = val; return; }
+        j = (j + 1) & (m->cap - 1);
+    }
+    m->slots[j].key = key;
+    m->slots[j].val = val;
+    m->count++;
+}
+
+static void *strmap_get(StrMap *m, const char *key) {
+    if (m->cap == 0) return NULL;
+    size_t j = fnv1a(key) & (m->cap - 1);
+    while (m->slots[j].key) {
+        if (strcmp(m->slots[j].key, key) == 0) return m->slots[j].val;
+        j = (j + 1) & (m->cap - 1);
+    }
+    return NULL;
+}
+
+static void strmap_free(StrMap *m) {
+    free(m->slots);
+    m->slots = NULL;
+    m->cap = m->count = 0;
+}
+
+// A jar's distilled directory: the source-entry names it contains (clj-family
+// only -- resolution never looks up `.class' etc.), read ONCE on first touch
+// and kept for the session (jars are immutable, PLAN fact #5).  So a require
+// that misses a jar costs an in-memory binary search instead of re-reading the
+// jar's central directory on every probe.  An empty `entries' / zero
+// `n_entries' also caches a jar that could not be opened, so it is not retried.
+typedef struct {
+    char  *jar_path;     // owned key
+    char **entries;      // owned, sorted clj-source entry names
+    size_t n_entries;
+} JarDir;
 
 // ===========================================================================
 // Workspace: one per project, holds N FileNodes + the shared parser.
 //
-// `files' is a flat array keyed by path (linear scan -- file counts per
-// session are small; swap for a hash if it ever matters).  `classpath' is
-// stored for the cross-file slice; unused here.
+// `files' owns the N FileNodes; `file_map' indexes them by path (a StrMap hash)
+// so intern/lookup is O(1), not a linear scan.  `classpath' is the per-call
+// default search scope for cross-file resolution: `build_require_graph' and the
+// jump-to-def point query pass it to `resolve_ns' (find-usages will pass a
+// per-invocation scope instead -- see the search-scope note in PLAN).  A jar
+// touched during resolution has its source-entry directory cached in `jar_dirs'
+// (indexed by `jar_map'), so a missing candidate is an in-memory search.
 // ===========================================================================
 
 typedef struct {
@@ -280,6 +377,9 @@ typedef struct {
     char     **def_forms; size_t n_def_forms; // user macros analysed like `defn`
     TSParser  *parser;    // one parser, language set once (not reentrant)
     FileNode **files;     size_t n_files, cap_files;
+    StrMap     file_map;  // path -> FileNode* (index over `files')
+    JarDir   **jar_dirs;  size_t n_jar_dirs, cap_jar_dirs;
+    StrMap     jar_map;   // jar path -> JarDir* (index over `jar_dirs')
 } Workspace;
 
 // --- FileNode lifecycle ---------------------------------------------------
@@ -330,9 +430,7 @@ static void filenode_free(FileNode *f) {
 }
 
 static FileNode *ws_find_file(Workspace *ws, const char *path) {
-    for (size_t i = 0; i < ws->n_files; i++)
-        if (strcmp(ws->files[i]->path, path) == 0) return ws->files[i];
-    return NULL;
+    return strmap_get(&ws->file_map, path);
 }
 
 static FileNode *ws_intern_file(Workspace *ws, const char *path) {
@@ -345,6 +443,7 @@ static FileNode *ws_intern_file(Workspace *ws, const char *path) {
         ws->files = realloc(ws->files, ws->cap_files * sizeof(FileNode *));
     }
     ws->files[ws->n_files++] = f;
+    strmap_put(&ws->file_map, f->path, f);   // key borrows the stable `f->path'
     return f;
 }
 
@@ -368,6 +467,16 @@ static void finalizer_workspace(void *ptr) {
     Workspace *ws = (Workspace *)ptr;
     for (size_t i = 0; i < ws->n_files; i++) filenode_free(ws->files[i]);
     free(ws->files);
+    strmap_free(&ws->file_map);
+    for (size_t i = 0; i < ws->n_jar_dirs; i++) {
+        JarDir *jd = ws->jar_dirs[i];
+        for (size_t j = 0; j < jd->n_entries; j++) free(jd->entries[j]);
+        free(jd->entries);
+        free(jd->jar_path);
+        free(jd);
+    }
+    free(ws->jar_dirs);
+    strmap_free(&ws->jar_map);
     if (ws->parser) ts_parser_delete(ws->parser);
     for (size_t i = 0; i < ws->n_classpath; i++) free(ws->classpath[i]);
     for (size_t i = 0; i < ws->n_def_forms; i++) free(ws->def_forms[i]);
@@ -1214,6 +1323,14 @@ static void analyze_node(Analyzer *a, TSNode node) {
             else if ((core = name_in(a->text, head, CORE_FORMS)))
                 push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
                           CAT_SPECIAL_FORM);
+            // `(quote ...)` and `(var ...)` mirror their reader-macro nodes
+            // (`'...` / `#'...`), which analyze_node treats as data above: the
+            // argument is a quoted/var datum, not a live value reference, so --
+            // having painted the head -- leave the body unresolved.  Without
+            // this, `(quote foo)` would record `foo` as a false var/local usage.
+            if (sym_name_eq(a->text, head, "quote") ||
+                sym_name_eq(a->text, head, "var"))
+                return;
             if (analyze_binding_form(a, node, head))
                 return;
             if (core) {                 // non-binding core form (if/when/cond/...)
@@ -1321,8 +1438,10 @@ static void push_req(NsIndex *ix, char *ns, uint32_t s, uint32_t e,
     }
     // has_alias / has_refer_vec / used default 0 here; parse_lib_spec sets the
     // eligibility flags on the vector branch, and the scope pass sets `used'.
+    // `resolved' (the forward require-graph edge) is NULL until the full-tier
+    // build_require_graph populates it.
     ix->requires[ix->n_requires++] =
-        (ReqSpec){ ns, s, e, refer_all, from_use, 0, 0, 0 };
+        (ReqSpec){ ns, s, e, refer_all, from_use, 0, 0, 0, NULL };
 }
 
 static void push_var(NsIndex *ix, char *name, uint32_t ns, uint32_t ne,
@@ -1744,8 +1863,9 @@ static TSNode reader_conditional_branch(const char *text, const char *path, TSNo
 // `#(...)` literal (runs on call, not on load), a deferred-body form whose
 // method/instance bodies run on dispatch or method call rather than at load
 // (`defmethod`/`reify`/`proxy`/`extend-type`/`extend-protocol` -- see
-// METHOD_BODY_FORMS), an `(ns ...)` form, a `(comment ...)` form, and
-// quote/discard/eval reader wrappers.  A user
+// METHOD_BODY_FORMS), an `(ns ...)` form, and quote/discard/eval reader
+// wrappers.  A `(comment ...)` body is NOT opaque -- it is descended like `do`
+// (matching the scope pass), so a `def` inside a comment is recorded.  A user
 // `extra-def-form` (analysed like `defn`) is treated identically to a def-like
 // form: its name is interned and its body is a function boundary -- so the scope
 // pass and this pass agree on what such a form is.
@@ -1777,9 +1897,13 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
             }
             if (name_in(text, head, FN_FORMS) ||       // (fn ...) / (fn* ...)
                 name_in(text, head, METHOD_BODY_FORMS) || // defmethod/reify/...
-                sym_name_eq(text, head, "ns") ||       // (ns ...)
-                sym_name_eq(text, head, "comment"))     // (comment ...)
+                sym_name_eq(text, head, "ns"))         // (ns ...)
                 return;                                 // opaque body
+            // `(comment ...)` is deliberately NOT a boundary -- its body is
+            // descended like `do`, so a `def` nested in a comment is interned
+            // into the file surface, matching the scope pass (which already
+            // walks comment bodies): both passes treat `(comment ...)`
+            // transparently.
         }
         // Otherwise fall through: do/let/when/call/... descend into the body.
     }
@@ -1802,6 +1926,16 @@ static void extract_var_defs(Workspace *ws, FileNode *f, const char *text,
 
 // `redefined-var`: a var name defined by more than one top-level form (warn on
 // each definition after the first).
+//
+// DELIBERATE: defs nested in a `(comment ...)` count toward this.  scan_var_defs
+// descends comment bodies transparently (like `do`) so a comment-nested def is
+// part of the file's var surface -- navigable, and symmetric with the scope
+// pass, which already walks comment bodies.  A consequence is that a `def` in a
+// rich-comment block plus a same-named top-level `def` trips `redefined-var`.
+// That is intentional, not an oversight: do NOT special-case `(comment ...)`
+// out here without also making scan_var_defs treat it as opaque again (the two
+// must agree on what the surface is).  This is a conscious divergence from
+// clj-kondo, which does not flag a redefinition across a comment boundary.
 static void lint_redefined_var(FileNode *f) {
     NsIndex *ix = &f->index;
     for (size_t i = 0; i < ix->n_vars; i++) {
@@ -2079,18 +2213,81 @@ static int is_jar_path(const char *cp) {
     return n >= 4 && memcmp(cp + n - 4, ".jar", 4) == 0;
 }
 
+static int cstr_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+// Return JAR_PATH's cached source-entry directory, reading it once on first
+// touch (jars are immutable per session, so it is never refreshed).  Keeps only
+// clj-family entries -- resolution never looks up `.class' etc. -- sorted for
+// binary search.  A jar that cannot be opened is cached empty so it is never
+// re-probed.  Indexed by `jar_map', so the lookup is O(1) across requires.
+static JarDir *jar_get_or_load(Workspace *ws, const char *jar_path) {
+    JarDir *jd = strmap_get(&ws->jar_map, jar_path);
+    if (jd) return jd;
+    jd = calloc(1, sizeof(JarDir));
+    jd->jar_path = strdup(jar_path);
+    size_t n = 0;
+    char **all = jar_list_entries(jar_path, &n);   // every file entry, or NULL
+    if (all) {
+        jd->entries = malloc(n * sizeof(char *));
+        size_t got = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (has_clj_ext(all[i])) jd->entries[got++] = all[i];
+            else free(all[i]);                     // drop non-source entries
+        }
+        free(all);
+        jd->n_entries = got;
+        // Trim the array to the kept source entries -- a jar is mostly `.class',
+        // so the full-count allocation would otherwise pin unused slots all
+        // session (the comment's "bounds memory" only holds with this).
+        if (got) {
+            jd->entries = realloc(jd->entries, got * sizeof(char *));
+            if (got > 1) qsort(jd->entries, got, sizeof(char *), cstr_cmp);
+        } else {
+            free(jd->entries);
+            jd->entries = NULL;
+        }
+    }
+    if (ws->n_jar_dirs == ws->cap_jar_dirs) {
+        ws->cap_jar_dirs = ws->cap_jar_dirs ? ws->cap_jar_dirs * 2 : 8;
+        ws->jar_dirs = realloc(ws->jar_dirs, ws->cap_jar_dirs * sizeof(JarDir *));
+    }
+    ws->jar_dirs[ws->n_jar_dirs++] = jd;
+    strmap_put(&ws->jar_map, jd->jar_path, jd);    // key borrows `jd->jar_path'
+    return jd;
+}
+
+// Binary-search JD's sorted source-entry names for ENTRY.
+static int jar_has_entry(JarDir *jd, const char *entry) {
+    size_t lo = 0, hi = jd->n_entries;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(jd->entries[mid], entry);
+        if (c == 0) return 1;
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return 0;
+}
+
 // Probe REL (the ns-munged relative path) inside the jar at JAR for each source
 // extension; return the FileNode for the entry that declares NS, or NULL.  The
-// entry path is the jar-internal name ("clojure/string.clj"); the FileNode is
-// keyed by the synthetic "<jar>!<entry>" so jar surfaces never collide with
-// disk paths and are cached immutably (index_jar_entry).
+// jar's source-entry directory is cached on first touch (jar_get_or_load), so a
+// candidate that is absent costs an in-memory binary search -- no jar I/O -- and
+// only a real hit reads + parses the entry.  The entry path is the jar-internal
+// name ("clojure/string.clj"); the FileNode is keyed by the synthetic
+// "<jar>!<entry>" so jar surfaces never collide with disk paths and are cached
+// immutably (index_jar_entry).
 static FileNode *resolve_ns_in_jar(Workspace *ws, const char *jar, const char *rel,
                                    const char *ns, unsigned mask) {
+    JarDir *jd = jar_get_or_load(ws, jar);
+    if (jd->n_entries == 0) return NULL;               // empty or unreadable jar
     for (size_t e = 0; CLJ_EXTS[e]; e++) {
         char entry[2200], key[8192];
         int n1 = snprintf(entry, sizeof entry, "%s%s", rel, CLJ_EXTS[e]);
         if (n1 < 0 || (size_t)n1 >= sizeof entry) continue;
         if ((dialect_mask(entry) & mask) == 0) continue;   // disjoint platforms
+        if (!jar_has_entry(jd, entry)) continue;           // absent: no jar I/O
         int n2 = snprintf(key, sizeof key, "%s!%s", jar, entry);
         if (n2 < 0 || (size_t)n2 >= sizeof key) continue;
         FileNode *o = index_jar_entry(ws, jar, entry, key);
@@ -2138,14 +2335,41 @@ static FileNode *resolve_ns(Workspace *ws, const char *const *dirs, size_t n_dir
     return NULL;
 }
 
-// Run the buffer-local analysis on F's current tree.  Every fact computed here
-// is buffer-only and reads NO dependencies -- at either tier.  CROSS_FILE no
-// longer gates dependency I/O (the scope pass does none); it now selects only
-// the *cadence* of the buffer-determinable Tier-2 lints (`unused-namespace' /
-// `unused-referred-var'), emitted at the full tier so they do not flash on every
-// after-edit check.  Cross-file dependency resolution lives entirely in the
-// jump-to-def point query (resolve_cross_ns); the dependency-reading Tier-2
-// diagnostics that will reintroduce check-time dep I/O land in a later slice.
+// Resolve F's forward require graph: for each require in its NsIndex, store the
+// dependency FileNode `resolve_ns' finds over the workspace classpath (a source
+// file or a jar entry), or NULL when it does not resolve.  This is the slice
+// that **reintroduces check-time dependency I/O** -- reads each needed dep
+// lazily, mtime-gated by index_disk_file (jars are immutable per session), so an
+// unchanged dep is reused and a changed one re-read (pull-based staleness, PLAN
+// fact #4).  It is full-tier only and emits NO diagnostic: an unresolved require
+// just leaves a NULL edge.  The dependency-reading Tier-2 lints
+// (unresolved-namespace, undefined var) and project-wide find-usages will read
+// these edges next (the require graph is their seed); `treejure-requires' exposes
+// them for inspection.  Skips F itself (skip_path) so a require never resolves to
+// the live buffer's stale on-disk copy.
+static void build_require_graph(Workspace *ws, FileNode *f) {
+    NsIndex *ix = &f->index;
+    if (ws->n_classpath == 0) return;          // no classpath -> nothing to resolve
+    unsigned mask = dialect_mask(f->path);
+    for (size_t i = 0; i < ix->n_requires; i++) {
+        ReqSpec *r = &ix->requires[i];
+        if (!r->ns) continue;
+        r->resolved = resolve_ns(ws, (const char *const *)ws->classpath,
+                                 ws->n_classpath, r->ns, mask, f->path);
+    }
+}
+
+// Run the buffer-local analysis on F's current tree.  The scope pass and every
+// buffer-only fact reach NO `resolve_ns' call and read NO dependencies -- at
+// either tier.  CROSS_FILE gates the FULL tier, which now does two extra things:
+// the buffer-determinable Tier-2 lints (`unused-namespace' /
+// `unused-referred-var', still dependency-free -- emitted here only so they do
+// not flash on every after-edit check), AND, as of this slice, the forward
+// **require graph** (build_require_graph) -- the first check-time dependency I/O.
+// The fast tier stays dependency-I/O-free.  Cross-namespace jump-to-def still
+// resolves on its own in the point query (resolve_cross_ns); the
+// dependency-reading Tier-2 *warning* diagnostics that consume the require graph
+// land in later slices.
 static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
     filenode_clear_outputs(f);
     if (!f->tree) return;
@@ -2163,17 +2387,22 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
     analyze_body(&a, root, 0);   // top level: every form is a reference context
     free(a.locals);
 
-    // --- Full-tier-only facts (still buffer-only; cadence, not I/O) --------
+    // --- Full-tier-only facts --------------------------------------------
     if (cross_file) {
         // `unused-namespace' / `unused-referred-var': buffer-determinable -- the
         // scope pass already flagged each used require / referred var above, so
         // this reads no dependencies.  Emitted only here (not the fast tier) so
         // it tracks the PLAN's Tier-2 cadence and does not flash on edit.
         lint_unused_requires(f);
-        // Remaining Tier-2 work attaches here: the `:unresolved' face and the
-        // dependency lints that DO need disk reads (unresolved-namespace,
-        // undefined var, ...).  Those need exhaustive, jar-inclusive knowledge
-        // to avoid false positives, so they land with a later slice (PLAN step 4).
+        // The forward require graph: resolve each require to its dependency
+        // FileNode over the classpath (lazy, mtime-gated).  This DOES read
+        // dependencies -- the first check-time dependency I/O -- but emits no
+        // diagnostic; it is the seed the dependency-reading Tier-2 lints
+        // (unresolved-namespace, undefined var) and find-usages read next.  Those
+        // warning diagnostics + the `:unresolved' face need exhaustive,
+        // jar-inclusive knowledge to avoid false positives, so they land with a
+        // later slice (PLAN step 4+); only the graph itself is built here.
+        build_require_graph(ws, f);
     }
 
     if (f->nspans > 1)
@@ -2282,12 +2511,13 @@ static emacs_value diagnostics_to_lisp(emacs_env *env, FileNode *f) {
 
 // (treejure-check-buffer WS FILE LIVE-TEXT CROSS-FILE-P) -> diagnostics.
 // Incremental reparse + grammar diagnostics + buffer-local scope pass.  The
-// CROSS-FILE-P flag is routed to analyze_file; both tiers are buffer-only (no
-// dependency I/O), and the flag now selects only the cadence of the full tier's
-// `unused-namespace' / `unused-referred-var' Tier-2 lints (lint_unused_requires)
-// so they do not flash on edit.  The dependency-reading Tier-2 lints/faces and
-// the `:unresolved' face are still later slices (PLAN step 4), and will be what
-// reintroduces check-time dependency I/O.
+// CROSS-FILE-P flag is routed to analyze_file.  The fast tier (nil) is
+// buffer-only (no dependency I/O); the full tier (t) adds the buffer-determinable
+// `unused-namespace' / `unused-referred-var' lints AND builds the forward require
+// graph (build_require_graph) -- which DOES read dependencies (lazy, mtime-gated),
+// the first check-time dependency I/O.  The require graph emits no diagnostic; the
+// dependency-reading Tier-2 *warning* lints/faces (`:unresolved', undefined var,
+// unresolved-namespace) that consume it are still later slices (PLAN step 4+).
 static emacs_value f_check_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
     Workspace *ws = env->get_user_ptr(env, args[0]);
     if (!ws) return Qnil(env);
@@ -2524,6 +2754,46 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
     return res;
 }
 
+// (treejure-requires WS FILE) -> list of (:ns NS :file PATH-or-nil) plists.
+// FILE's forward require graph as built by the last FULL-tier check: each
+// required namespace and the dependency file `resolve_ns' resolved it to over the
+// classpath (a source path, or the synthetic "<jar>!<entry>" path for a jar
+// dep), or nil when it did not resolve (unknown ns, or the graph was not built --
+// only a fast-tier check has run).  A pure read of the cached edges -- it does NO
+// I/O; run a full-tier `treejure-check-buffer' first to (re)build the graph.
+// Exposes the require graph for inspection/tests; the dependency-reading lints
+// read the same edges directly in C.
+static emacs_value f_requires(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
+    Workspace *ws = env->get_user_ptr(env, args[0]);
+    if (!ws) return Qnil(env);
+    size_t plen; char *path = copy_lisp_string(env, args[1], &plen);
+    if (!path) return Qnil(env);
+    FileNode *f = ws_find_file(ws, path);
+    free(path);
+    if (!f) return Qnil(env);
+
+    NsIndex *ix = &f->index;
+    if (ix->n_requires == 0) return Qnil(env);
+    emacs_value listf  = env->intern(env, "list");
+    emacs_value k_ns   = env->intern(env, ":ns");
+    emacs_value k_file = env->intern(env, ":file");
+    emacs_value *items = malloc(ix->n_requires * sizeof(emacs_value));
+    for (size_t i = 0; i < ix->n_requires; i++) {
+        ReqSpec *r = &ix->requires[i];
+        emacs_value ns_v = r->ns
+            ? env->make_string(env, r->ns, (ptrdiff_t)strlen(r->ns)) : Qnil(env);
+        emacs_value file_v = (r->resolved && r->resolved->path)
+            ? env->make_string(env, r->resolved->path,
+                               (ptrdiff_t)strlen(r->resolved->path))
+            : Qnil(env);
+        emacs_value pl[] = { k_ns, ns_v, k_file, file_v };
+        items[i] = env->funcall(env, listf, 4, pl);
+    }
+    emacs_value res = env->funcall(env, listf, (ptrdiff_t)ix->n_requires, items);
+    free(items);
+    return res;
+}
+
 // (treejure-close-buffer WS FILE) -> nil.  Revert the file to disk-backed,
 // dropping its transient live tree/text (the node is kept for the session).
 static emacs_value f_close_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
@@ -2612,6 +2882,7 @@ int emacs_module_init(struct emacs_runtime *ert) {
     bind_fn(env, "treejure-semantic-faces",  4, 4, f_semantic_faces);
     bind_fn(env, "treejure-definition",      3, 3, f_definition);
     bind_fn(env, "treejure-references",      3, 4, f_references);
+    bind_fn(env, "treejure-requires",        2, 2, f_requires);
     bind_fn(env, "treejure-close-buffer",    2, 2, f_close_buffer);
     bind_fn(env, "treejure-jar-entry",       2, 2, f_jar_entry);
     bind_fn(env, "treejure-set-def-forms",   2, 2, f_set_def_forms);
