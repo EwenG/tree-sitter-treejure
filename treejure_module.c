@@ -314,10 +314,20 @@ typedef struct {
     char    *name;        // the var name (malloc'd)
 } VarUsage;
 
-// The distilled namespace surface of a file: its ns name, the flattened
-// requires, the aliases/refers it brings into scope, and the vars it defines.
-// Recomputed on each check for the active buffer; the seed of PLAN's NsIndex
-// (arities arrive later).
+// The distilled namespace surface of a file, FOR ONE DIALECT: its ns name, the
+// flattened requires, the aliases/refers it brings into scope, the vars it
+// defines, and the cross-ns / unresolved-candidate usages the scope pass
+// recorded (the seed the full-tier `resolve_var_usages' consumes).  Recomputed
+// on each check for the active buffer; the seed of PLAN's NsIndex (arities
+// arrive later).
+//
+// A `.cljc' file carries TWO of these -- one per active dialect (clj + cljs) --
+// because reader conditionals make the require/var surface dialect-dependent: a
+// `:cljs'-only var is real for a cljs requirer but invisible to a clj one.  The
+// primary (clj for `.cljc') lives in `FileNode.index'; the secondary (cljs) in
+// `FileNode.alt_index'.  A single-dialect file fills only `index'.  `usages'
+// pairs with this dialect's requires/aliases so `resolve_var_usages' matches a
+// usage against the right platform's surface.
 typedef struct {
     char    *ns_name;           // the file's namespace (malloc'd), or NULL
     uint32_t ns_start, ns_end;  // the ns-name symbol's span
@@ -325,6 +335,7 @@ typedef struct {
     VarDef  *vars;     size_t n_vars, cap_vars;
     AliasEntry *aliases; size_t n_aliases, cap_aliases;
     ReferEntry *refers;  size_t n_refers,  cap_refers;
+    VarUsage   *usages;  size_t n_usages,  cap_usages;
 } NsIndex;
 
 // ===========================================================================
@@ -362,16 +373,18 @@ struct FileNode {
     int       is_jar;    // surface came from a jar entry -> immutable, never re-read
     int       analysis_level; // cached analysis depth (ANALYSIS_*) for a non-live
                               // node; with `indexed_mtime' gates cache reuse
+    int       multi_dialect;  // 1 for a `.cljc' file (clj surface in `index',
+                              // cljs surface in `alt_index'); 0 otherwise
 
-    NsIndex   index;     // distilled ns surface (requires + vars), per check
+    NsIndex   index;     // distilled ns surface for the primary dialect, per check
+    NsIndex   alt_index; // the secondary-dialect (cljs) surface of a `.cljc' file;
+                         // empty (and untouched) for a single-dialect file
     SemanticSpan *spans; // sorted by start, recomputed each check
     size_t        nspans, cap_spans;
     Diagnostic   *diags; // recomputed each check
     size_t        ndiags, cap_diags;
-    NavRef       *navs;  // navigation occurrences (locals + same-ns vars)
-    size_t        nnavs, cap_navs;
-    VarUsage     *usages; // cross-ns / unresolved-candidate refs (full tier only)
-    size_t        nusages, cap_usages;
+    NavRef       *navs;  // navigation occurrences (locals + same-ns vars), unioned
+    size_t        nnavs, cap_navs;  // across dialect passes then deduped
 };
 
 // ===========================================================================
@@ -512,6 +525,10 @@ static void nsindex_clear(NsIndex *ix) {
         free(ix->refers[i].name); free(ix->refers[i].ns);
     }
     ix->n_refers = 0;
+    for (size_t i = 0; i < ix->n_usages; i++) {
+        free(ix->usages[i].ns); free(ix->usages[i].name);
+    }
+    ix->n_usages = 0;
 }
 
 static void filenode_clear_outputs(FileNode *f) {
@@ -520,25 +537,29 @@ static void filenode_clear_outputs(FileNode *f) {
     f->nspans = 0;
     for (size_t i = 0; i < f->nnavs; i++) free(f->navs[i].name);
     f->nnavs = 0;
-    for (size_t i = 0; i < f->nusages; i++) {
-        free(f->usages[i].ns); free(f->usages[i].name);
-    }
-    f->nusages = 0;
+    f->multi_dialect = 0;
     nsindex_clear(&f->index);
+    nsindex_clear(&f->alt_index);
+}
+
+// Free an NsIndex's backing arrays (after nsindex_clear has freed its elements).
+static void nsindex_free_arrays(NsIndex *ix) {
+    free(ix->requires);
+    free(ix->vars);
+    free(ix->aliases);
+    free(ix->refers);
+    free(ix->usages);
 }
 
 static void filenode_free(FileNode *f) {
     if (!f) return;
     filenode_clear_outputs(f);
     if (f->tree) ts_tree_delete(f->tree);
-    free(f->index.requires);
-    free(f->index.vars);
-    free(f->index.aliases);
-    free(f->index.refers);
+    nsindex_free_arrays(&f->index);
+    nsindex_free_arrays(&f->alt_index);
     free(f->spans);
     free(f->diags);
     free(f->navs);
-    free(f->usages);
     free(f->text);
     free(f->path);
     free(f);
@@ -732,9 +753,12 @@ static int kw_name_eq(const char *text, TSNode kw, const char *s) {
 typedef struct {
     Workspace *ws;
     FileNode  *f;
+    NsIndex   *ix;              // the dialect surface this pass reads/writes
+                               // (`&f->index' or `&f->alt_index')
+    const char *feat;           // reader-conditional dialect feature for this pass
+                               // ("clj"/"cljs"/...) -- selects the live branch
     const char *text;
     Local     *locals; size_t nlocals, cap_locals;
-    int        next_local_id;   // monotonic per file, assigned at each binding
     int        cross_file;      // record cross-ns var usages (full tier only)
     int        in_unbound_body; // >0 inside a deftype/reify/extend-* body whose
                                 // member positions we do not yet bind
@@ -759,19 +783,21 @@ static void push_nav(FileNode *f, uint32_t start, uint32_t end, int kind,
 // dependency-reading pass (resolve_var_usages).  NS (the target namespace, NUL-
 // free, length NS_LEN) is NULL for a bare symbol that resolved to nothing
 // locally; NAME (length NAME_LEN) is the var name.  Both are copied.  Buffer-
-// only: this just captures data -- it never resolves a dependency.
-static void push_usage(FileNode *f, uint32_t start, uint32_t end,
+// only: this just captures data -- it never resolves a dependency.  Recorded
+// into the current dialect pass's surface IX, so a usage pairs with the
+// requires/aliases of the platform whose branch it came from.
+static void push_usage(NsIndex *ix, uint32_t start, uint32_t end,
                        const char *ns, size_t ns_len,
                        const char *name, size_t name_len) {
-    if (f->nusages == f->cap_usages) {
-        f->cap_usages = f->cap_usages ? f->cap_usages * 2 : 32;
-        f->usages = realloc(f->usages, f->cap_usages * sizeof(VarUsage));
+    if (ix->n_usages == ix->cap_usages) {
+        ix->cap_usages = ix->cap_usages ? ix->cap_usages * 2 : 32;
+        ix->usages = realloc(ix->usages, ix->cap_usages * sizeof(VarUsage));
     }
     char *ns_dup = NULL;
     if (ns) { ns_dup = malloc(ns_len + 1); memcpy(ns_dup, ns, ns_len); ns_dup[ns_len] = '\0'; }
     char *nm_dup = malloc(name_len + 1);
     memcpy(nm_dup, name, name_len); nm_dup[name_len] = '\0';
-    f->usages[f->nusages++] = (VarUsage){ start, end, ns_dup, nm_dup };
+    ix->usages[ix->n_usages++] = (VarUsage){ start, end, ns_dup, nm_dup };
 }
 
 static void push_span(FileNode *f, uint32_t start, uint32_t end, int cat) {
@@ -821,7 +847,14 @@ static void push_local(Analyzer *a, TSNode sym) {
     }
     const char *name = a->text + na;
     size_t name_len = nb - na;
-    int id = a->next_local_id++;
+    // The binding's start byte IS its `local_id'.  A byte offset is unique per
+    // binding occurrence and STABLE across the two per-dialect passes a `.cljc'
+    // file runs, so a non-conditional binding gets the same id in both -- and its
+    // usages (in either platform branch) group with it consistently, letting the
+    // post-pass nav dedup collapse exact duplicates.  (A monotonic per-pass
+    // counter would assign the same binding different ids in the clj and cljs
+    // passes, breaking that grouping.)
+    int id = (int)a0;
     a->locals[a->nlocals++] = (Local){
         .name = name, .name_len = name_len,
         .start = a0, .end = b0, .used = 0,
@@ -898,7 +931,7 @@ static void mark_refer_used(NsIndex *ix, const char *name, size_t len) {
 // at read time (never to a local), so it counts as a var usage there too.
 static void resolve_bare_var(Analyzer *a, uint32_t ss, uint32_t se,
                              const char *name, size_t len, int record_usage) {
-    NsIndex *ix = &a->f->index;
+    NsIndex *ix = a->ix;
     for (size_t v = 0; v < ix->n_vars; v++) {
         if (strlen(ix->vars[v].name) == len &&
             memcmp(ix->vars[v].name, name, len) == 0) {
@@ -929,7 +962,7 @@ static void resolve_bare_var(Analyzer *a, uint32_t ss, uint32_t se,
         if (matched_refer)
             // A `:refer'-ed var is a known cross-ns target -> reliable, always
             // recorded (even inside an unbound body, where it is a real ref).
-            push_usage(a->f, ss, se, refer_ns, strlen(refer_ns), name, len);
+            push_usage(ix, ss, se, refer_ns, strlen(refer_ns), name, len);
         else if (!a->in_unbound_body && !(len > 0 && name[len - 1] == '#'))
             // A truly-bare candidate -> suppressed when:
             //   * inside a deftype/reify/extend-* body, where it may be an unbound
@@ -938,7 +971,7 @@ static void resolve_bare_var(Analyzer *a, uint32_t ss, uint32_t se,
             //     syntax-quote template escaped via `~x#'): a generated symbol, not
             //     a var, so flagging it `:unresolved'/`undefined-var' would
             //     false-positive (clj-kondo treats trailing-`#' as a gensym).
-            push_usage(a->f, ss, se, NULL, 0, name, len);
+            push_usage(ix, ss, se, NULL, 0, name, len);
     }
 }
 
@@ -966,7 +999,7 @@ static void resolve_qualified_ref(Analyzer *a, TSNode sym, TSNode nm) {
     if (ts_node_is_null(nsf)) return;
     const char *q = a->text + ts_node_start_byte(nsf);
     size_t qlen = ts_node_end_byte(nsf) - ts_node_start_byte(nsf);
-    NsIndex *ix = &a->f->index;
+    NsIndex *ix = a->ix;
     mark_ns_qualifier_used(ix, q, qlen);
     if (!a->cross_file) return;          // cross-ns usage recording: full tier only
     uint32_t ss = ts_node_start_byte(sym), se = ts_node_end_byte(sym);
@@ -977,7 +1010,7 @@ static void resolve_qualified_ref(Analyzer *a, TSNode sym, TSNode nm) {
             tns = ix->aliases[i].ns; tlen = strlen(tns); break;
         }
     uint32_t na = ts_node_start_byte(nm), nb = ts_node_end_byte(nm);
-    push_usage(a->f, ss, se, tns, tlen, a->text + na, nb - na);
+    push_usage(ix, ss, se, tns, tlen, a->text + na, nb - na);
 }
 
 // Resolve SYM as a VAR reference only (never a local) -- a `#'x' var-quote target
@@ -1061,7 +1094,7 @@ static void resolve_ref(Analyzer *a, TSNode sym) {
 static void analyze_node(Analyzer *a, TSNode node);
 static void bind_pattern(Analyzer *a, TSNode pat);
 static void scan_syntax_quote(Analyzer *a, TSNode node, int level);
-static TSNode reader_conditional_branch(const char *text, const char *path, TSNode node);
+static TSNode reader_conditional_branch(const char *text, const char *feat, TSNode node);
 
 // Bind every symbol introduced by a destructuring pattern.
 static void bind_pattern(Analyzer *a, TSNode pat) {
@@ -1497,7 +1530,7 @@ static void scan_syntax_quote(Analyzer *a, TSNode node, int level) {
         if (sym_has_namespace(node)) {
             TSNode nsf = ts_node_child_by_field_name(node, "namespace", 9);
             if (!ts_node_is_null(nsf))
-                mark_ns_qualifier_used(&a->f->index,
+                mark_ns_qualifier_used(a->ix,
                                        a->text + ts_node_start_byte(nsf),
                                        ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
         } else {
@@ -1538,7 +1571,7 @@ static void analyze_node(Analyzer *a, TSNode node) {
             ts_node_end_byte(mk) - ts_node_start_byte(mk) == 2) {
             TSNode nsf = ts_node_child_by_field_name(node, "namespace", 9);
             if (!ts_node_is_null(nsf))
-                mark_ns_qualifier_used(&a->f->index,
+                mark_ns_qualifier_used(a->ix,
                                        a->text + ts_node_start_byte(nsf),
                                        ts_node_end_byte(nsf) - ts_node_start_byte(nsf));
         }
@@ -1584,11 +1617,13 @@ static void analyze_node(Analyzer *a, TSNode node) {
         strcmp(t, "eval_literal") == 0)
         return;
 
-    // Reader conditional: honor only this file's dialect branch (or :default),
-    // matching var extraction -- so resolution never sees another platform's
-    // code (a `:cljs'-only reference must not resolve against a `.clj' file).
+    // Reader conditional: honor the branch for THIS PASS's dialect (`a->feat')
+    // -- for a `.cljc' file the scope pass runs once per active dialect, so the
+    // clj pass walks the `:clj' branch and the cljs pass the `:cljs' branch; a
+    // single-dialect file runs once.  Resolution thus never sees another
+    // platform's code (a `:cljs'-only reference must not resolve against `:clj').
     if (strcmp(t, "reader_conditional") == 0) {
-        analyze_node(a, reader_conditional_branch(a->text, a->f->path, node));
+        analyze_node(a, reader_conditional_branch(a->text, a->feat, node));
         return;
     }
 
@@ -1911,12 +1946,12 @@ static int ns_path_matches(const char *ns, const char *path) {
 // extraction use; seeing a `:cljs'-only require from a `.clj'-dialect read is the
 // deferred per-dialect cljc slice (PLAN step 4).  A non-conditional spec goes
 // straight to parse_lib_spec.
-static void parse_require_spec(NsIndex *ix, const char *text, const char *path,
+static void parse_require_spec(NsIndex *ix, const char *text, const char *feat,
                                TSNode spec, int from_use) {
     TSNode u = unwrap_meta(spec);
     if (ts_node_is_null(u)) return;
     if (type_is(u, "reader_conditional")) {
-        TSNode branch = reader_conditional_branch(text, path, u);
+        TSNode branch = reader_conditional_branch(text, feat, u);
         if (ts_node_is_null(branch)) return;
         TSNode marker = ts_node_child_by_field_name(u, "marker", 6);
         if (!ts_node_is_null(marker) && type_is(marker, "marker_splicing")) {
@@ -1925,11 +1960,11 @@ static void parse_require_spec(NsIndex *ix, const char *text, const char *path,
             if (type_is(bv, "vector_literal")) {
                 TSNode el;
                 for (uint32_t i = 0; !ts_node_is_null(el = nth_form(bv, i)); i++)
-                    parse_require_spec(ix, text, path, el, from_use);
+                    parse_require_spec(ix, text, feat, el, from_use);
             }
             return;
         }
-        parse_require_spec(ix, text, path, branch, from_use);   // `#?': one spec
+        parse_require_spec(ix, text, feat, branch, from_use);   // `#?': one spec
         return;
     }
     parse_lib_spec(ix, text, u, NULL, from_use);
@@ -1940,8 +1975,8 @@ static void parse_require_spec(NsIndex *ix, const char *text, const char *path,
 // diagnostics (refer-all / duplicate-require) are emitted once over the FULL
 // require set by lint_require_specs -- after any top-level `(require ...)` forms
 // are also collected (see analyze_requires) -- so a top-level duplicate is caught.
-static void analyze_ns_form(FileNode *f, const char *text, TSNode ns_list) {
-    NsIndex *ix = &f->index;
+static void analyze_ns_form(FileNode *f, NsIndex *ix, const char *text,
+                            TSNode ns_list, const char *feat) {
     TSNode name = unwrap_meta(nth_form(ns_list, 1));
     if (!ts_node_is_null(name) && type_is(name, "symbol")) {
         free(ix->ns_name);   // a top-level (in-ns ...) may have set it first
@@ -1983,7 +2018,7 @@ static void analyze_ns_form(FileNode *f, const char *text, TSNode ns_list) {
                     while (!ts_node_is_null(spec = nth_form(cu, j))) {
                         // skip trailing flag keywords (:reload, :verbose, ...)
                         if (!type_is(unwrap_meta(spec), "keyword"))
-                            parse_require_spec(ix, text, f->path, spec, is_use);
+                            parse_require_spec(ix, text, feat, spec, is_use);
                         j++;
                     }
                 }
@@ -2057,14 +2092,14 @@ static int is_opaque_wrapper(TSNode n) {
 // form.  NAME is copied (for the var) and, when RECORD_NAVS, copied again into a
 // def-site NAV_VAR occurrence (find-references / jump-to-def; keyed by name, so a
 // redefinition adds a second def nav).  The one place a var enters the index.
-static void intern_var(FileNode *f, const char *name, size_t name_len,
+static void intern_var(FileNode *f, NsIndex *ix, const char *name, size_t name_len,
                        uint32_t name_start, uint32_t name_end,
                        uint32_t def_start, uint32_t def_end,
                        int private, int declared, int synthesized,
                        int record_navs) {
     char *dup = malloc(name_len + 1);
     memcpy(dup, name, name_len); dup[name_len] = '\0';
-    push_var(&f->index, dup, name_start, name_end, def_start, def_end,
+    push_var(ix, dup, name_start, name_end, def_start, def_end,
              private, declared, synthesized);
     if (record_navs)
         push_nav(f, name_start, name_end, NAV_VAR, -1, name, name_len, 1);
@@ -2073,7 +2108,7 @@ static void intern_var(FileNode *f, const char *name, size_t name_len,
 // Intern a synthesized factory var PREFIX+TNAME (e.g. `->Foo`, `map->Foo` for
 // deftype/defrecord).  It has no source symbol of its own, so its name span is
 // the type name's span (NAME_START/END) -- jump-to-def lands on the type form.
-static void intern_factory(FileNode *f, const char *prefix,
+static void intern_factory(FileNode *f, NsIndex *ix, const char *prefix,
                            const char *tname, size_t tlen,
                            uint32_t name_start, uint32_t name_end,
                            uint32_t def_start, uint32_t def_end, int record_navs) {
@@ -2082,7 +2117,7 @@ static void intern_factory(FileNode *f, const char *prefix,
     memcpy(built, prefix, pl);
     memcpy(built + pl, tname, tlen);
     built[pl + tlen] = '\0';
-    intern_var(f, built, pl + tlen, name_start, name_end,
+    intern_var(f, ix, built, pl + tlen, name_start, name_end,
                def_start, def_end, 0 /*private*/, 0 /*declared*/,
                1 /*synthesized*/, record_navs);
     free(built);
@@ -2094,7 +2129,7 @@ static void intern_factory(FileNode *f, const char *prefix,
 // lists, so they are skipped) and intern each method name.  Clojure makes these
 // public; mirrors clj-kondo's `:analysis' (which records protocol/interface
 // method vars).
-static void record_method_vars(FileNode *f, const char *text, TSNode u,
+static void record_method_vars(FileNode *f, NsIndex *ix, const char *text, TSNode u,
                                int record_navs) {
     uint32_t k = 2; TSNode c;
     while (!ts_node_is_null(c = nth_form(u, k))) {
@@ -2104,7 +2139,7 @@ static void record_method_vars(FileNode *f, const char *text, TSNode u,
             if (!ts_node_is_null(mname) && type_is(mname, "symbol")) {
                 TSNode mnm = field_name_node(mname);
                 if (!ts_node_is_null(mnm))
-                    intern_var(f, text + ts_node_start_byte(mnm),
+                    intern_var(f, ix, text + ts_node_start_byte(mnm),
                                ts_node_end_byte(mnm) - ts_node_start_byte(mnm),
                                ts_node_start_byte(mname), ts_node_end_byte(mname),
                                ts_node_start_byte(cu), ts_node_end_byte(cu),
@@ -2125,8 +2160,8 @@ static void record_method_vars(FileNode *f, const char *text, TSNode u,
 // parity: `defprotocol`/`definterface` -> one var per method name;
 // `deftype` -> the positional factory `->Name`; `defrecord` -> `->Name` and the
 // map factory `map->Name`.
-static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head,
-                           int record_navs) {
+static void record_var_def(FileNode *f, NsIndex *ix, const char *text, TSNode u,
+                           TSNode head, int record_navs) {
     // `(declare a b c)`: forward-declares one or more vars.  Each name is
     // interned with the `declared' bit set, so cross-file / in-file resolution
     // sees the var while `lint_redefined_var' skips it (a `declare' then `def'
@@ -2142,7 +2177,7 @@ static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head,
                     // `(declare ^:private foo)' forward-declares a private var --
                     // read the metadata off the (possibly wrapped) name like the
                     // non-declare path does.
-                    intern_var(f, text + ts_node_start_byte(nm),
+                    intern_var(f, ix, text + ts_node_start_byte(nm),
                                ts_node_end_byte(nm) - ts_node_start_byte(nm),
                                ts_node_start_byte(name), ts_node_end_byte(name),
                                ds, de, name_has_private_meta(text, c),
@@ -2164,18 +2199,18 @@ static void record_var_def(FileNode *f, const char *text, TSNode u, TSNode head,
     uint32_t na = ts_node_start_byte(nm),   nb = ts_node_end_byte(nm);
     uint32_t ds = ts_node_start_byte(u),    de = ts_node_end_byte(u);
     // The primary var: the protocol/interface/type/var name itself.
-    intern_var(f, text + na, nb - na, ns, ne, ds, de, private,
+    intern_var(f, ix, text + na, nb - na, ns, ne, ds, de, private,
                0 /*declared*/, 0 /*synthesized*/, record_navs);
 
     // Secondary vars some forms synthesize (see the function comment).
     if (sym_name_eq(text, head, "defprotocol") ||
         sym_name_eq(text, head, "definterface")) {
-        record_method_vars(f, text, u, record_navs);
+        record_method_vars(f, ix, text, u, record_navs);
     } else if (sym_name_eq(text, head, "deftype") ||
                sym_name_eq(text, head, "defrecord")) {
-        intern_factory(f, "->", text + na, nb - na, ns, ne, ds, de, record_navs);
+        intern_factory(f, ix, "->", text + na, nb - na, ns, ne, ds, de, record_navs);
         if (sym_name_eq(text, head, "defrecord"))
-            intern_factory(f, "map->", text + na, nb - na, ns, ne, ds, de,
+            intern_factory(f, ix, "map->", text + na, nb - na, ns, ne, ds, de,
                            record_navs);
     }
 }
@@ -2192,15 +2227,16 @@ static const char *dialect_feature(const char *path) {
     return "clj";   // .clj / .cljc / .bb / unknown -> clj
 }
 
-// The reader-conditional branch live for PATH's dialect: the platform feature
-// branch if present, else the `:default' branch, else a null node.  NODE is a
-// `reader_conditional'; its `body' is the `(:feat form :feat form ...)' list.
-// Shared by the scope pass (analyze_node) and var extraction (scan_var_defs) so
-// both honor exactly one branch -- the single dialect-selection seam.
-static TSNode reader_conditional_branch(const char *text, const char *path, TSNode node) {
+// The reader-conditional branch live for dialect feature FEAT ("clj"/"cljs"/
+// ...): the platform feature branch if present, else the `:default' branch, else
+// a null node.  NODE is a `reader_conditional'; its `body' is the
+// `(:feat form :feat form ...)' list.  Shared by the scope pass (analyze_node)
+// and var/require extraction so all honor exactly one branch -- the single
+// dialect-selection seam, now driven by an explicit FEAT so a `.cljc' file can
+// be analyzed once per active dialect (clj + cljs).
+static TSNode reader_conditional_branch(const char *text, const char *feat, TSNode node) {
     TSNode body = ts_node_child_by_field_name(node, "body", 4);
     if (!ts_node_is_null(body) && type_is(body, "list_literal")) {
-        const char *feat = dialect_feature(path);
         TSNode fallback = body; int have_fallback = 0;
         for (uint32_t k = 0; ; k += 2) {
             TSNode kw  = unwrap_meta(nth_form(body, k));
@@ -2231,8 +2267,8 @@ static TSNode reader_conditional_branch(const char *text, const char *path, TSNo
 // `extra-def-form` (analysed like `defn`) is treated identically to a def-like
 // form: its name is interned and its body is a function boundary -- so the scope
 // pass and this pass agree on what such a form is.
-static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
-                          TSNode node, int record_navs) {
+static void scan_var_defs(Workspace *ws, FileNode *f, NsIndex *ix, const char *text,
+                          TSNode node, const char *feat, int record_navs) {
     if (ts_node_is_null(node)) return;
     node = unwrap_meta(node);
     if (ts_node_is_null(node)) return;
@@ -2241,10 +2277,12 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
     if (type_is(node, "fn_literal")) return;     // #(...) -- function boundary
 
     if (type_is(node, "reader_conditional")) {   // #?(...) / #?@(...)
-        // Honor only the branch for this file's dialect (or :default), so a var
-        // defined once per platform is not seen as a redefinition.
-        scan_var_defs(ws, f, text, reader_conditional_branch(text, f->path, node),
-                      record_navs);
+        // Honor only the branch for THIS PASS's dialect (FEAT), so a `.cljc' file
+        // records the `:cljs'-only vars into its cljs surface and the `:clj'-only
+        // vars into its clj surface -- and a var defined once per platform is not
+        // seen as a redefinition within either.
+        scan_var_defs(ws, f, ix, text, reader_conditional_branch(text, feat, node),
+                      feat, record_navs);
         return;
     }
 
@@ -2254,7 +2292,7 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
             !sym_has_namespace(head)) {
             if (name_in(text, head, VAR_DEF_FORMS) ||
                 is_extra_def_form(ws, text, head)) {   // record, then stop
-                record_var_def(f, text, node, head, record_navs);
+                record_var_def(f, ix, text, node, head, record_navs);
                 return;
             }
             if (name_in(text, head, FN_FORMS) ||       // (fn ...) / (fn* ...)
@@ -2272,7 +2310,7 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
 
     TSNode c;
     for (uint32_t k = 0; !ts_node_is_null(c = nth_form(node, k)); k++)
-        scan_var_defs(ws, f, text, c, record_navs);
+        scan_var_defs(ws, f, ix, text, c, feat, record_navs);
 }
 
 // Record every var defined at load time into F's NsIndex.  Top-level def-like
@@ -2281,9 +2319,10 @@ static void scan_var_defs(Workspace *ws, FileNode *f, const char *text,
 // behind a function/ns/comment/quote boundary are not (see scan_var_defs).
 // RECORD_NAVS adds def-site nav occurrences -- t for the live buffer, nil when
 // indexing a dependency (whose navs are never queried).
-static void extract_var_defs(Workspace *ws, FileNode *f, const char *text,
-                             TSNode root, int record_navs) {
-    scan_var_defs(ws, f, text, root, record_navs);
+static void extract_var_defs(Workspace *ws, FileNode *f, NsIndex *ix,
+                             const char *text, TSNode root, const char *feat,
+                             int record_navs) {
+    scan_var_defs(ws, f, ix, text, root, feat, record_navs);
 }
 
 // `redefined-var`: a var name defined by more than one top-level form (warn on
@@ -2298,8 +2337,7 @@ static void extract_var_defs(Workspace *ws, FileNode *f, const char *text,
 // out here without also making scan_var_defs treat it as opaque again (the two
 // must agree on what the surface is).  This is a conscious divergence from
 // clj-kondo, which does not flag a redefinition across a comment boundary.
-static void lint_redefined_var(FileNode *f) {
-    NsIndex *ix = &f->index;
+static void lint_redefined_var(FileNode *f, NsIndex *ix) {
     for (size_t i = 0; i < ix->n_vars; i++) {
         // A `declare' never redefines, and a synthesized factory/method var
         // (`->Name'/`map->Name', a protocol/interface method) is not a literal
@@ -2328,8 +2366,7 @@ static void lint_redefined_var(FileNode *f) {
 // (matching clj-kondo) -- only an `:as'-aliased or `:refer'/`:only' require is
 // eligible.  Reads no dependencies: this is buffer-only, just emitted at the
 // full tier (its PLAN Tier-2 cadence) so it does not flash during after-edit.
-static void lint_unused_requires(FileNode *f) {
-    NsIndex *ix = &f->index;
+static void lint_unused_requires(FileNode *f, NsIndex *ix) {
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *r = &ix->requires[i];
         if (r->used || r->refer_all) continue;
@@ -2351,8 +2388,7 @@ static void lint_unused_requires(FileNode *f) {
 // file's FULL require set -- the `(ns ...)` :require/:use specs PLUS any top-level
 // `(require ...)` / `(use ...)` forms -- so a top-level require that duplicates an
 // ns one is flagged at its (later) site, matching clj-kondo.
-static void lint_require_specs(FileNode *f) {
-    NsIndex *ix = &f->index;
+static void lint_require_specs(FileNode *f, NsIndex *ix) {
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *s = &ix->requires[i];
         if (s->refer_all)
@@ -2384,13 +2420,13 @@ static TSNode unwrap_quote(TSNode n) {
 // flattened by parse_require_spec exactly like an `(ns ...)` :require spec.
 // Trailing flag keywords (`:reload`, `:verbose`, ...) -- bare, not quoted -- are
 // skipped.
-static void analyze_toplevel_require(FileNode *f, const char *text, TSNode list,
-                                     int from_use) {
+static void analyze_toplevel_require(FileNode *f, NsIndex *ix, const char *text,
+                                     TSNode list, int from_use, const char *feat) {
     uint32_t k = 1; TSNode arg;
     while (!ts_node_is_null(arg = nth_form(list, k))) {
         TSNode spec = unwrap_quote(unwrap_meta(arg));
         if (!ts_node_is_null(spec) && !type_is(spec, "keyword"))
-            parse_require_spec(&f->index, text, f->path, spec, from_use);
+            parse_require_spec(ix, text, feat, spec, from_use);
         k++;
     }
 }
@@ -2399,27 +2435,29 @@ static void analyze_toplevel_require(FileNode *f, const char *text, TSNode list,
 // mapping so `short/var` resolves, mirroring `(ns ... (:require [the.ns :as
 // short]))`.  `(alias ...)` only names an already-loaded ns, so it adds the alias
 // the resolver needs but no require edge.
-static void analyze_toplevel_alias(FileNode *f, const char *text, TSNode list) {
+static void analyze_toplevel_alias(FileNode *f, NsIndex *ix, const char *text,
+                                   TSNode list) {
     TSNode al = unwrap_quote(unwrap_meta(nth_form(list, 1)));
     TSNode ns = unwrap_quote(unwrap_meta(nth_form(list, 2)));
     if (ts_node_is_null(al) || ts_node_is_null(ns) ||
         !type_is(al, "symbol") || !type_is(ns, "symbol"))
         return;
     char *ns_str = node_text_dup(text, ns);
-    push_alias(&f->index, text, al, ns_str);
+    push_alias(ix, text, al, ns_str);
     free(ns_str);                          // push_alias copied it
 }
 
 // A top-level `(in-ns 'my.ns)`: name the file's namespace when no `(ns ...)`
 // governs it (the common REPL/script pattern).  A single NsIndex cannot model a
 // mid-file ns switch, so only the first governing namespace is recorded.
-static void analyze_toplevel_inns(FileNode *f, const char *text, TSNode list) {
-    if (f->index.ns_name) return;          // an (ns ...) / earlier in-ns governs
+static void analyze_toplevel_inns(FileNode *f, NsIndex *ix, const char *text,
+                                  TSNode list) {
+    if (ix->ns_name) return;               // an (ns ...) / earlier in-ns governs
     TSNode ns = unwrap_quote(unwrap_meta(nth_form(list, 1)));
     if (ts_node_is_null(ns) || !type_is(ns, "symbol")) return;
-    f->index.ns_name  = node_text_dup(text, ns);
-    f->index.ns_start = ts_node_start_byte(ns);
-    f->index.ns_end   = ts_node_end_byte(ns);
+    ix->ns_name  = node_text_dup(text, ns);
+    ix->ns_start = ts_node_start_byte(ns);
+    ix->ns_end   = ts_node_end_byte(ns);
 }
 
 // Distil the file's namespace surface: the first `(ns ...)` form (its name +
@@ -2436,16 +2474,16 @@ static void analyze_toplevel_inns(FileNode *f, const char *text, TSNode list) {
 // scan_var_defs -- requires inside a rich comment are scratch and must not be
 // linted/graphed, whereas a comment-nested def is harmless navigation (see the
 // `comment' stop below).  Only the first `(ns ...)` governs (SEEN_NS).
-static void scan_requires(Workspace *ws, FileNode *f, const char *text,
-                          TSNode node, int *seen_ns) {
+static void scan_requires(Workspace *ws, FileNode *f, NsIndex *ix, const char *text,
+                          TSNode node, const char *feat, int *seen_ns) {
     if (ts_node_is_null(node)) return;
     node = unwrap_meta(node);
     if (ts_node_is_null(node)) return;
     if (is_opaque_wrapper(node)) return;            // '... `... #'... #_... #=...
     if (type_is(node, "fn_literal")) return;        // #(...) -- function boundary
-    if (type_is(node, "reader_conditional")) {      // honor this dialect's branch
-        scan_requires(ws, f, text,
-                      reader_conditional_branch(text, f->path, node), seen_ns);
+    if (type_is(node, "reader_conditional")) {      // honor this PASS's dialect branch
+        scan_requires(ws, f, ix, text,
+                      reader_conditional_branch(text, feat, node), feat, seen_ns);
         return;
     }
     if (type_is(node, "list_literal")) {
@@ -2454,19 +2492,19 @@ static void scan_requires(Workspace *ws, FileNode *f, const char *text,
             !sym_has_namespace(head)) {
             if (sym_name_eq(text, head, "ns")) {
                 if (!*seen_ns) {                     // only the first ns governs
-                    analyze_ns_form(f, text, node);
+                    analyze_ns_form(f, ix, text, node, feat);
                     *seen_ns = 1;
                 }
                 return;                              // never descend an ns body
             }
             if (sym_name_eq(text, head, "require")) {
-                analyze_toplevel_require(f, text, node, 0); return; }
+                analyze_toplevel_require(f, ix, text, node, 0, feat); return; }
             if (sym_name_eq(text, head, "use")) {
-                analyze_toplevel_require(f, text, node, 1); return; }
+                analyze_toplevel_require(f, ix, text, node, 1, feat); return; }
             if (sym_name_eq(text, head, "alias")) {
-                analyze_toplevel_alias(f, text, node); return; }
+                analyze_toplevel_alias(f, ix, text, node); return; }
             if (sym_name_eq(text, head, "in-ns")) {
-                analyze_toplevel_inns(f, text, node); return; }
+                analyze_toplevel_inns(f, ix, text, node); return; }
             // `(comment ...)' is an opaque boundary HERE -- deliberately ASYMMETRIC
             // with scan_var_defs, which descends it.  A require/use inside a
             // rich-comment block is REPL scratch, not the load-time surface, and
@@ -2488,14 +2526,14 @@ static void scan_requires(Workspace *ws, FileNode *f, const char *text,
     // do/let/when/comment/call/... -- descend looking for load-time requires.
     TSNode c;
     for (uint32_t k = 0; !ts_node_is_null(c = nth_form(node, k)); k++)
-        scan_requires(ws, f, text, c, seen_ns);
+        scan_requires(ws, f, ix, text, c, feat, seen_ns);
 }
 
-static void analyze_requires(Workspace *ws, FileNode *f, const char *text,
-                             TSNode root) {
+static void analyze_requires(Workspace *ws, FileNode *f, NsIndex *ix,
+                             const char *text, TSNode root, const char *feat) {
     int seen_ns = 0;
-    scan_requires(ws, f, text, root, &seen_ns);
-    lint_require_specs(f);
+    scan_requires(ws, f, ix, text, root, feat, &seen_ns);
+    lint_require_specs(f, ix);
 }
 
 // ===========================================================================
@@ -2554,6 +2592,34 @@ static unsigned dialect_mask(const char *path) {
     return DIA_CLJ;
 }
 
+// The active reader-conditional dialects of a file, primary first: a `.cljc'
+// participates in BOTH clj and cljs (its surface is distilled once per platform);
+// every other extension is a single dialect.  Fills FEATS / MASKS (cap 2) and
+// returns the count (1 or 2).  This is the loop the per-dialect `.cljc' surfaces
+// run over -- the existing single-branch seam (dialect_feature) lifted to a list.
+static size_t active_dialects(const char *path, const char *feats[2],
+                              unsigned masks[2]) {
+    const char *dot = strrchr(path, '.');
+    if (dot && strcmp(dot, ".cljc") == 0) {
+        feats[0] = "clj";  masks[0] = DIA_CLJ;
+        feats[1] = "cljs"; masks[1] = DIA_CLJS;
+        return 2;
+    }
+    feats[0] = dialect_feature(path);
+    masks[0] = dialect_mask(path);
+    return 1;
+}
+
+// The dependency surface a requirer on platform MASK should read from DEP.  A
+// `.cljc' dependency carries its clj surface in `index' and its cljs surface in
+// `alt_index'; a pure-cljs requirer (MASK == DIA_CLJS) wants the latter so a
+// `:cljs'-only var resolves.  Every other case -- a single-dialect dep, or a clj
+// requirer -- reads the primary `index'.
+static NsIndex *dep_surface(FileNode *dep, unsigned mask) {
+    if (dep->multi_dialect && mask == DIA_CLJS) return &dep->alt_index;
+    return &dep->index;
+}
+
 // Seed F's NsIndex ns name for a *dependency* index, mirroring scan_requires'
 // load-time descent so a dependency is named the SAME way the live buffer names
 // itself.  Without this the seed saw only a top-level `(ns ...)' list, so a dep
@@ -2564,16 +2630,16 @@ static unsigned dialect_mask(const char *path) {
 // diagnostics): a dependency is queried for the vars it defines, and resolve_ns
 // confirms it by ns_name.  A real `(ns ...)' wins over an earlier `(in-ns ...)',
 // matching analyze_ns_form / analyze_toplevel_inns; only the first governs.
-static void scan_ns_name(Workspace *ws, const char *text, const char *path,
-                         TSNode node, FileNode *f, int *seen_ns) {
+static void scan_ns_name(Workspace *ws, const char *text, const char *feat,
+                         TSNode node, FileNode *f, NsIndex *ix, int *seen_ns) {
     if (ts_node_is_null(node)) return;
     node = unwrap_meta(node);
     if (ts_node_is_null(node)) return;
     if (is_opaque_wrapper(node)) return;            // '... `... #'... #_... #=...
     if (type_is(node, "fn_literal")) return;        // #(...) -- function boundary
     if (type_is(node, "reader_conditional")) {
-        scan_ns_name(ws, text, path, reader_conditional_branch(text, path, node),
-                     f, seen_ns);
+        scan_ns_name(ws, text, feat, reader_conditional_branch(text, feat, node),
+                     f, ix, seen_ns);
         return;
     }
     if (type_is(node, "list_literal")) {
@@ -2584,22 +2650,22 @@ static void scan_ns_name(Workspace *ws, const char *text, const char *path,
                 if (!*seen_ns) {                    // first ns form governs
                     TSNode name = unwrap_meta(nth_form(node, 1));
                     if (!ts_node_is_null(name) && type_is(name, "symbol")) {
-                        free(f->index.ns_name);     // override an earlier in-ns
-                        f->index.ns_name  = node_text_dup(text, name);
-                        f->index.ns_start = ts_node_start_byte(name);
-                        f->index.ns_end   = ts_node_end_byte(name);
+                        free(ix->ns_name);          // override an earlier in-ns
+                        ix->ns_name  = node_text_dup(text, name);
+                        ix->ns_start = ts_node_start_byte(name);
+                        ix->ns_end   = ts_node_end_byte(name);
                     }
                     *seen_ns = 1;
                 }
                 return;                             // never descend an ns body
             }
             if (sym_name_eq(text, head, "in-ns")) {
-                if (!f->index.ns_name) {            // only if no ns/in-ns governs yet
+                if (!ix->ns_name) {                 // only if no ns/in-ns governs yet
                     TSNode ns = unwrap_quote(unwrap_meta(nth_form(node, 1)));
                     if (!ts_node_is_null(ns) && type_is(ns, "symbol")) {
-                        f->index.ns_name  = node_text_dup(text, ns);
-                        f->index.ns_start = ts_node_start_byte(ns);
-                        f->index.ns_end   = ts_node_end_byte(ns);
+                        ix->ns_name  = node_text_dup(text, ns);
+                        ix->ns_start = ts_node_start_byte(ns);
+                        ix->ns_end   = ts_node_end_byte(ns);
                     }
                 }
                 return;
@@ -2621,16 +2687,18 @@ static void scan_ns_name(Workspace *ws, const char *text, const char *path,
     }
     TSNode c;
     for (uint32_t k = 0; !ts_node_is_null(c = nth_form(node, k)); k++)
-        scan_ns_name(ws, text, path, c, f, seen_ns);
+        scan_ns_name(ws, text, feat, c, f, ix, seen_ns);
 }
 
 // Lightweight seed for indexed (non-buffer) files: the ns name only -- no
 // requires/vars/diagnostics (those are recomputed by analyze_file when the file
-// becomes the live buffer).
-static void extract_ns_name(Workspace *ws, FileNode *f) {
+// becomes the live buffer).  The ns name is dialect-independent in practice, so
+// it is read once (under the primary FEAT) into the primary surface IX.
+static void extract_ns_name(Workspace *ws, FileNode *f, NsIndex *ix,
+                            const char *feat) {
     if (!f->tree) return;
     int seen_ns = 0;
-    scan_ns_name(ws, f->text, f->path, ts_tree_root_node(f->tree), f, &seen_ns);
+    scan_ns_name(ws, f->text, feat, ts_tree_root_node(f->tree), f, ix, &seen_ns);
 }
 
 // Read PATH wholesale into a fresh NUL-terminated buffer (*len excludes NUL).
@@ -2738,24 +2806,40 @@ static void prune_to_usages_cache(FileNode *f) {
 //     dropped, and the local navs are dropped (a local is never a cross-file
 //     find-usages match).  If the file is later opened live, f_check_buffer
 //     reparses it from scratch, so nothing kept here is trusted for the live path.
+static void dedup_navs(FileNode *f);   // defined with the cross-dialect dedups
+
+// A `.cljc' dependency is distilled once per active dialect, so a `:cljs'-only
+// var enters its cljs surface (`alt_index') and resolves for a cljs requirer
+// (`dep_surface'); the ns name (dialect-independent) is read once into the
+// primary `index', which `resolve_ns' confirms against.  Single-dialect deps run
+// one pass into `index', unchanged.
 static void distill_file(Workspace *ws, FileNode *f, int level) {
     filenode_clear_outputs(f);
     if (!f->tree) { f->analysis_level = ANALYSIS_NONE; return; }
     TSNode root = ts_tree_root_node(f->tree);
+    const char *feats[2]; unsigned masks[2];
+    size_t ndia = active_dialects(f->path, feats, masks);
+    NsIndex *targets[2] = { &f->index, &f->alt_index };
     if (level >= ANALYSIS_USAGES) {
-        int seen_ns = 0;
-        scan_requires(ws, f, f->text, root, &seen_ns);   // ns + aliases/refers
-        extract_var_defs(ws, f, f->text, root, 1);       // vars + def-site navs
-        Analyzer a = { .ws = ws, .f = f, .text = f->text,
-                       .locals = NULL, .nlocals = 0, .cap_locals = 0,
-                       .next_local_id = 0, .cross_file = 1, .in_unbound_body = 0 };
-        analyze_body(&a, root, 0);
-        free(a.locals);
+        for (size_t di = 0; di < ndia; di++) {
+            NsIndex *ix = targets[di];
+            int seen_ns = 0;
+            scan_requires(ws, f, ix, f->text, root, feats[di], &seen_ns);  // ns + aliases/refers
+            extract_var_defs(ws, f, ix, f->text, root, feats[di], 1);      // vars + def-site navs
+            Analyzer a = { .ws = ws, .f = f, .ix = ix, .feat = feats[di],
+                           .text = f->text, .locals = NULL, .nlocals = 0,
+                           .cap_locals = 0, .cross_file = 1, .in_unbound_body = 0 };
+            analyze_body(&a, root, 0);
+            free(a.locals);
+        }
         prune_navs_to_usages(f);             // faces + local navs: live buffer only
+        if (ndia == 2) dedup_navs(f);        // collapse the two passes' shared NAV_VARs
     } else {
-        extract_ns_name(ws, f);              // surface: ns name only
-        extract_var_defs(ws, f, f->text, root, 0);       // dep: no navs
+        extract_ns_name(ws, f, &f->index, feats[0]);     // surface: ns name only (primary)
+        for (size_t di = 0; di < ndia; di++)
+            extract_var_defs(ws, f, targets[di], f->text, root, feats[di], 0);  // dep: no navs
     }
+    f->multi_dialect = (ndia == 2);
     f->analysis_level = level;
     ts_tree_delete(f->tree); f->tree = NULL;
     free(f->text); f->text = NULL; f->len = 0;
@@ -3075,10 +3159,9 @@ static FileNode *resolve_ns_memo(NsCache *cache, Workspace *ws,
 // the live buffer's stale on-disk copy.  CACHE is the optional per-pass
 // `resolve_ns' memo (NULL for a single-file check; the cold scan shares one across
 // all files, so a shared lib is resolved at most once for the whole scan).
-static void build_require_graph(Workspace *ws, FileNode *f, NsCache *cache) {
-    NsIndex *ix = &f->index;
+static void build_require_graph(Workspace *ws, FileNode *f, NsIndex *ix,
+                                unsigned mask, NsCache *cache) {
     if (ws->n_classpath == 0) return;          // no classpath -> nothing to resolve
-    unsigned mask = dialect_mask(f->path);
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *r = &ix->requires[i];
         if (!r->ns) continue;
@@ -3106,11 +3189,12 @@ static void build_require_graph(Workspace *ws, FileNode *f, NsCache *cache) {
 //     these stay silent.
 // ===========================================================================
 
-// Does DEP define a var named NAME[0,LEN)?  Scans its distilled var surface.
-static int dep_defines_var(FileNode *dep, const char *name, size_t len) {
-    for (size_t v = 0; v < dep->index.n_vars; v++)
-        if (strlen(dep->index.vars[v].name) == len &&
-            memcmp(dep->index.vars[v].name, name, len) == 0)
+// Does the dependency surface DIX define a var named NAME[0,LEN)?  DIX is the
+// dialect surface (dep_surface) the requiring platform should read.
+static int dep_defines_var(NsIndex *dix, const char *name, size_t len) {
+    for (size_t v = 0; v < dix->n_vars; v++)
+        if (strlen(dix->vars[v].name) == len &&
+            memcmp(dix->vars[v].name, name, len) == 0)
             return 1;
     return 0;
 }
@@ -3164,10 +3248,9 @@ static int looks_non_var(const char *name, size_t len) {
     return 0;
 }
 
-// The implicit core namespace for PATH's dialect (every Clojure file refers it),
-// or NULL when its core var set is not modeled.
-static const char *core_ns_for(const char *path) {
-    const char *feat = dialect_feature(path);   // clj/cljs/cljr/cljd (cljc -> clj)
+// The implicit core namespace for dialect feature FEAT (every Clojure file refers
+// it), or NULL when its core var set is not modeled.
+static const char *core_ns_for(const char *feat) {
     if (strcmp(feat, "cljs") == 0) return "cljs.core";
     if (strcmp(feat, "clj") == 0)  return "clojure.core";
     return NULL;   // cljr/cljd: core var set not modeled yet -> never flag bare
@@ -3184,9 +3267,8 @@ static int has_refer_all(NsIndex *ix) {
 
 // `unresolved-namespace' (gated): a require whose forward edge is NULL -- it
 // resolved to nothing on the (complete) classpath.
-static void lint_unresolved_namespace(Workspace *ws, FileNode *f) {
+static void lint_unresolved_namespace(Workspace *ws, FileNode *f, NsIndex *ix) {
     if (!ws->classpath_complete) return;
-    NsIndex *ix = &f->index;
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *r = &ix->requires[i];
         if (!r->ns || r->resolved) continue;
@@ -3209,8 +3291,8 @@ static void lint_unresolved_namespace(Workspace *ws, FileNode *f) {
 // CACHE is the optional per-pass `resolve_ns' memo (see build_require_graph):
 // the implicit core ns is resolved once per file here, but sharing the cold
 // scan's memo also collapses the core resolution across all scanned files.
-static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
-    NsIndex *ix = &f->index;
+static void resolve_var_usages(Workspace *ws, FileNode *f, NsIndex *ix,
+                               const char *feat, unsigned mask, NsCache *cache) {
     int refer_all = has_refer_all(ix);
     // Resolve the implicit core ns at most once per pass (the hot case: every
     // bare core symbol hits it).  Only sound -- and only reached -- under a
@@ -3218,19 +3300,20 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
     FileNode *core_dep = NULL;
     int core_resolved = 0;
 
-    for (size_t u = 0; u < f->nusages; u++) {
-        VarUsage *use = &f->usages[u];
+    for (size_t u = 0; u < ix->n_usages; u++) {
+        VarUsage *use = &ix->usages[u];
         size_t nlen = strlen(use->name);
         if (use->ns) {                              // qualified / `:refer'-ed
             FileNode *dep = NULL;
+            NsIndex *dix = NULL;
             if (ix->ns_name && strcmp(use->ns, ix->ns_name) == 0) {
-                dep = f;                            // fully-qualified self-ref
+                dep = f; dix = ix;                  // fully-qualified self-ref (this dialect)
             } else {
                 ReqSpec *r = find_require_by_ns(ix, use->ns);
-                if (r && r->resolved) dep = r->resolved;
+                if (r && r->resolved) { dep = r->resolved; dix = dep_surface(dep, mask); }
             }
             if (!dep || dep->opaque) continue;      // unresolved/source-less: not our call
-            if (dep_defines_var(dep, use->name, nlen)) continue;
+            if (dep_defines_var(dix, use->name, nlen)) continue;
             push_diag(f, use->start, use->end, SEV_WARNING, DIAG_UNDEFINED_VAR,
                       msg_printf("var %s/%s is undefined", use->ns, use->name));
             if (ws->classpath_complete)
@@ -3241,10 +3324,10 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
             if (looks_non_var(use->name, nlen)) continue;
             if (cstr_in_set(use->name, nlen, CORE_FORMS)) continue;  // special form
             if (!core_resolved) {
-                const char *core = core_ns_for(f->path);
+                const char *core = core_ns_for(feat);
                 core_dep = core
                     ? resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
-                                      ws->n_classpath, core, dialect_mask(f->path), f->path)
+                                      ws->n_classpath, core, mask, f->path)
                     : NULL;
                 core_resolved = 1;
             }
@@ -3255,9 +3338,126 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
             // rather than flag every bare core symbol.  A truly complete classpath
             // resolves its core, so a real unknown is still painted.
             if (!core_dep || core_dep->opaque) continue;
-            if (dep_defines_var(core_dep, use->name, nlen)) continue;  // a core var
+            if (dep_defines_var(dep_surface(core_dep, mask), use->name, nlen))
+                continue;                                            // a core var
             push_span(f, use->start, use->end, CAT_UNRESOLVED);
         }
+    }
+}
+
+// --- Cross-dialect output dedup (for a `.cljc' file's two passes) ----------
+//
+// A `.cljc' file is analyzed once per active dialect (clj + cljs), each pass
+// appending its diagnostics / face spans / navigation occurrences to F.  Code
+// OUTSIDE a reader conditional is walked identically by both passes, so it yields
+// EXACT-duplicate outputs -- a non-conditional unused binding warns twice, a
+// non-conditional `:local' face is recorded twice, a non-conditional def nav is
+// recorded twice.  Conditional code differs between passes and is kept per
+// platform.  So "diagnostics on non-conditional code deduped across dialects to a
+// single report" (PLAN) reduces to dropping EXACT duplicates -- the
+// position-derived `local_id' (see push_local) makes even local navs compare
+// equal across passes.  Single-dialect files run one pass and never reach these.
+
+// Drop a later diagnostic identical to an earlier one (same span, id, message).
+static void dedup_diags(FileNode *f) {
+    size_t w = 0;
+    for (size_t i = 0; i < f->ndiags; i++) {
+        Diagnostic *d = &f->diags[i];
+        int dup = 0;
+        for (size_t j = 0; j < w && !dup; j++) {
+            Diagnostic *e = &f->diags[j];
+            dup = d->start == e->start && d->end == e->end && d->id == e->id &&
+                  ((d->message == NULL && e->message == NULL) ||
+                   (d->message && e->message && strcmp(d->message, e->message) == 0));
+        }
+        if (dup) free(d->message);
+        else f->diags[w++] = *d;
+    }
+    f->ndiags = w;
+}
+
+// Drop a later span identical to an earlier one; also drop a `:local-unused'
+// span when an identical-range `:local' span exists (a binding used on EITHER
+// platform reads as used -- the face follows the more informative verdict, while
+// the per-platform `unused-binding' diagnostic still stands).
+static void dedup_spans(FileNode *f) {
+    size_t w = 0;
+    for (size_t i = 0; i < f->nspans; i++) {
+        SemanticSpan *s = &f->spans[i];
+        int drop = 0;
+        for (size_t j = 0; j < f->nspans && !drop; j++) {
+            if (j == i) continue;
+            SemanticSpan *o = &f->spans[j];
+            if (o->start != s->start || o->end != s->end) continue;
+            if (o->category == s->category) { drop = j < i; }   // exact dup: keep first
+            else if (s->category == CAT_LOCAL_UNUSED && o->category == CAT_LOCAL)
+                drop = 1;                                        // used wins the face
+        }
+        if (!drop) f->spans[w++] = *s;
+    }
+    f->nspans = w;
+}
+
+// Drop a later nav identical to an earlier one (same span, kind, def-bit, and
+// grouping key: `local_id' for locals -- position-derived, so cross-pass stable
+// -- or `name' for vars).
+static void dedup_navs(FileNode *f) {
+    size_t w = 0;
+    for (size_t i = 0; i < f->nnavs; i++) {
+        NavRef *n = &f->navs[i];
+        int dup = 0;
+        for (size_t j = 0; j < w && !dup; j++) {
+            NavRef *e = &f->navs[j];
+            dup = n->start == e->start && n->end == e->end && n->kind == e->kind &&
+                  n->is_def == e->is_def &&
+                  (n->kind == NAV_LOCAL ? n->local_id == e->local_id
+                   : (n->name && e->name && strcmp(n->name, e->name) == 0));
+        }
+        if (dup) free(n->name);
+        else f->navs[w++] = *n;
+    }
+    f->nnavs = w;
+}
+
+// One dialect pass of the buffer-local analysis: writes the require/var/usage
+// surface into IX and appends diagnostics / spans / navs to F, honoring FEAT's
+// reader-conditional branches.  MASK is the platform bitmask (for cross-file
+// resolution); CROSS_FILE gates the full-tier dependency-reading facts.  Run once
+// per active dialect by analyze_file (twice for a `.cljc' file).
+static void analyze_dialect_pass(Workspace *ws, FileNode *f, NsIndex *ix,
+                                 const char *feat, unsigned mask, TSNode root,
+                                 int cross_file, NsCache *cache) {
+    // --- Buffer-only facts (both tiers; no dependency I/O) -----------------
+    analyze_requires(ws, f, ix, f->text, root, feat);
+    extract_var_defs(ws, f, ix, f->text, root, feat, 1);  // live buffer: def navs
+    lint_redefined_var(f, ix);
+
+    Analyzer a = { .ws = ws, .f = f, .ix = ix, .feat = feat, .text = f->text,
+                   .locals = NULL, .nlocals = 0, .cap_locals = 0,
+                   .cross_file = cross_file, .in_unbound_body = 0 };
+    analyze_body(&a, root, 0);   // top level: every form is a reference context
+    free(a.locals);
+
+    // --- Full-tier-only facts --------------------------------------------
+    if (cross_file) {
+        // `unused-namespace' / `unused-referred-var': buffer-determinable -- the
+        // scope pass already flagged each used require / referred var above, so
+        // this reads no dependencies.  Emitted only here (not the fast tier) so
+        // it tracks the PLAN's Tier-2 cadence and does not flash on edit.
+        lint_unused_requires(f, ix);
+        // The forward require graph: resolve each require to its dependency
+        // FileNode over the classpath (lazy, mtime-gated).  This DOES read
+        // dependencies -- the first check-time dependency I/O -- but emits no
+        // diagnostic itself; it is the seed the dependency-reading Tier-2 facts
+        // below consume.
+        build_require_graph(ws, f, ix, mask, cache);
+        // The dependency-reading Tier-2 facts that consume the graph: a require
+        // with a NULL edge (`unresolved-namespace', gated), a qualified/`:refer'-ed
+        // var its resolved dep does not define (`undefined-var', unconditional --
+        // resolved deps only), and the `:unresolved' face (gated).  See the
+        // section comment above resolve_var_usages for the false-positive posture.
+        lint_unresolved_namespace(ws, f, ix);
+        resolve_var_usages(ws, f, ix, feat, mask, cache);
     }
 }
 
@@ -3277,6 +3477,13 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
 // resolves on its own in the point query (resolve_cross_ns).  CACHE is the
 // optional per-pass `resolve_ns' memo passed to the full-tier resolvers (NULL for
 // a single-file check; the cold scan threads one shared memo through every file).
+//
+// A `.cljc' file is analyzed ONCE PER ACTIVE DIALECT (clj into `index', cljs into
+// `alt_index') so a `:cljs'-only var/require enters the cljs surface and resolves
+// for cljs requirers (the per-dialect `.cljc' surfaces slice).  The two passes'
+// diagnostics / faces / navs are unioned then deduped (dedup_*): non-conditional
+// code reports once, conditional code per platform.  A single-dialect file runs
+// exactly one pass into `index' -- behaviour-identical to before.
 static void analyze_file(Workspace *ws, FileNode *f, int cross_file, NsCache *cache) {
     filenode_clear_outputs(f);
     if (!f->tree) return;
@@ -3287,39 +3494,20 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file, NsCache *ca
     ws->analyzing = f;
     TSNode root = ts_tree_root_node(f->tree);
 
-    // --- Buffer-only facts (both tiers; no dependency I/O) -----------------
-    collect_grammar_diags(f, root);
-    analyze_requires(ws, f, f->text, root);
-    extract_var_defs(ws, f, f->text, root, 1);   // live buffer: record def navs
-    lint_redefined_var(f);
+    collect_grammar_diags(f, root);   // dialect-independent: walked once
 
-    Analyzer a = { .ws = ws, .f = f, .text = f->text,
-                   .locals = NULL, .nlocals = 0, .cap_locals = 0,
-                   .next_local_id = 0, .cross_file = cross_file,
-                   .in_unbound_body = 0 };
-    analyze_body(&a, root, 0);   // top level: every form is a reference context
-    free(a.locals);
+    const char *feats[2]; unsigned masks[2];
+    size_t ndia = active_dialects(f->path, feats, masks);
+    NsIndex *targets[2] = { &f->index, &f->alt_index };
+    for (size_t di = 0; di < ndia; di++)
+        analyze_dialect_pass(ws, f, targets[di], feats[di], masks[di], root,
+                             cross_file, cache);
+    f->multi_dialect = (ndia == 2);
 
-    // --- Full-tier-only facts --------------------------------------------
-    if (cross_file) {
-        // `unused-namespace' / `unused-referred-var': buffer-determinable -- the
-        // scope pass already flagged each used require / referred var above, so
-        // this reads no dependencies.  Emitted only here (not the fast tier) so
-        // it tracks the PLAN's Tier-2 cadence and does not flash on edit.
-        lint_unused_requires(f);
-        // The forward require graph: resolve each require to its dependency
-        // FileNode over the classpath (lazy, mtime-gated).  This DOES read
-        // dependencies -- the first check-time dependency I/O -- but emits no
-        // diagnostic itself; it is the seed the dependency-reading Tier-2 facts
-        // below consume.
-        build_require_graph(ws, f, cache);
-        // The dependency-reading Tier-2 facts that consume the graph: a require
-        // with a NULL edge (`unresolved-namespace', gated), a qualified/`:refer'-ed
-        // var its resolved dep does not define (`undefined-var', unconditional --
-        // resolved deps only), and the `:unresolved' face (gated).  See the
-        // section comment above resolve_var_usages for the false-positive posture.
-        lint_unresolved_namespace(ws, f);
-        resolve_var_usages(ws, f, cache);
+    if (ndia == 2) {                  // collapse the two passes' shared outputs
+        dedup_diags(f);
+        dedup_spans(f);
+        dedup_navs(f);
     }
 
     if (f->nspans > 1)
@@ -3546,6 +3734,35 @@ static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
 // array, valid until the next indexing call -- use it at once.  The sole caller
 // is `treejure-definition' (jump-to-def): a single point query, so there is no
 // per-pass memo -- each call resolves at most one namespace.
+// Look up an alias / referred var / var def across a file's dialect surfaces
+// (primary, then -- for a `.cljc' -- the cljs surface).  A jump-to-def query in a
+// `.cljc' buffer has an ambiguous dialect, so it must see a `:cljs'-only alias /
+// `:refer' / in-file var as well as the clj ones.  Single-dialect files only
+// consult `index'.
+static const char *file_alias_ns(FileNode *f, const char *alias, size_t len) {
+    NsIndex *surf[2] = { &f->index, &f->alt_index };
+    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++)
+        for (size_t i = 0; i < surf[s]->n_aliases; i++)
+            if (strlen(surf[s]->aliases[i].alias) == len &&
+                memcmp(surf[s]->aliases[i].alias, alias, len) == 0)
+                return surf[s]->aliases[i].ns;
+    return NULL;
+}
+static const char *file_refer_ns(FileNode *f, const char *name, size_t len) {
+    NsIndex *surf[2] = { &f->index, &f->alt_index };
+    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++)
+        for (size_t i = 0; i < surf[s]->n_refers; i++)
+            if (strlen(surf[s]->refers[i].name) == len &&
+                memcmp(surf[s]->refers[i].name, name, len) == 0)
+                return surf[s]->refers[i].ns;
+    return NULL;
+}
+static const VarDef *file_find_vardef(FileNode *f, const char *name, size_t len) {
+    const VarDef *vd = find_vardef(&f->index, name, len);
+    if (!vd && f->multi_dialect) vd = find_vardef(&f->alt_index, name, len);
+    return vd;
+}
+
 static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
                                       const VarDef **out) {
     TSNode nmf = field_name_node(sym);
@@ -3553,7 +3770,6 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
     uint32_t na = ts_node_start_byte(nmf), nb = ts_node_end_byte(nmf);
     size_t nlen = nb - na;
     const char *nm = f->text + na;
-    NsIndex *ix = &f->index;
 
     const char *target_ns = NULL;
     char *lit = NULL;                  // owned literal-ns buffer (freed below)
@@ -3562,10 +3778,7 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
         uint32_t aa = ts_node_start_byte(nsf), ab = ts_node_end_byte(nsf);
         size_t alen = ab - aa;
         const char *al = f->text + aa;
-        for (size_t i = 0; i < ix->n_aliases && !target_ns; i++)
-            if (strlen(ix->aliases[i].alias) == alen &&
-                memcmp(ix->aliases[i].alias, al, alen) == 0)
-                target_ns = ix->aliases[i].ns;
+        target_ns = file_alias_ns(f, al, alen);        // alias (either dialect)
         if (!target_ns) {                              // not an alias -> literal ns
             lit = malloc(alen + 1);
             memcpy(lit, al, alen);
@@ -3573,10 +3786,7 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
             target_ns = lit;
         }
     } else {                                           // bare: a referred var
-        for (size_t i = 0; i < ix->n_refers && !target_ns; i++)
-            if (strlen(ix->refers[i].name) == nlen &&
-                memcmp(ix->refers[i].name, nm, nlen) == 0)
-                target_ns = ix->refers[i].ns;
+        target_ns = file_refer_ns(f, nm, nlen);        // refer (either dialect)
         if (!target_ns) return NULL;                   // same-ns/core/unresolved
     }
 
@@ -3584,9 +3794,9 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
     // inside `my.ns`) resolves to an in-file var.  resolve_ns skips the file
     // itself (skip_path), so it would never resolve -- handle it here against
     // the file's own var surface instead.
-    if (ix->ns_name && strcmp(target_ns, ix->ns_name) == 0) {
+    if (f->index.ns_name && strcmp(target_ns, f->index.ns_name) == 0) {
         free(lit);
-        const VarDef *vd = find_vardef(ix, nm, nlen);
+        const VarDef *vd = file_find_vardef(f, nm, nlen);
         if (vd) { if (out) *out = vd; return f; }
         return NULL;
     }
@@ -3596,7 +3806,9 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
                                dialect_mask(f->path), f->path);
     free(lit);                         // resolve_ns copied what it needed
     if (!dep) return NULL;
-    const VarDef *vd = find_vardef(&dep->index, nm, nlen);
+    // Search the dependency's primary surface, then -- for a `.cljc' dep -- its
+    // cljs surface, so jump-to-def lands on a `:cljs'-only var too.
+    const VarDef *vd = file_find_vardef(dep, nm, nlen);
     if (vd) { if (out) *out = vd; return dep; }
     return NULL;
 }
@@ -3638,7 +3850,9 @@ static emacs_value f_definition(emacs_env *env, ptrdiff_t nargs, emacs_value arg
                 return location_to_lisp(env, f, n->start, n->end);
         }
     } else if (r && r->name) {
-        const VarDef *vd = find_vardef(&f->index, r->name, strlen(r->name));
+        // Search both dialect surfaces: in a `.cljc' buffer the def of a
+        // `:cljs'-only var lives in `alt_index', not the primary `index'.
+        const VarDef *vd = file_find_vardef(f, r->name, strlen(r->name));
         if (vd) return location_to_lisp(env, f, vd->name_start, vd->name_end);
     }
     // Not an in-file local/var: try cross-namespace resolution.
@@ -3724,10 +3938,45 @@ static void collect_scope(const char *const *dirs, size_t n, PathVec *pv) {
     if (pv->n > 1) qsort(pv->v, pv->n, sizeof(char *), cstr_cmp);
 }
 
+// Total cross-ns usages G carries across its dialect surfaces (the slot count
+// harvest_matches may need for them).
+static size_t file_total_usages(FileNode *g) {
+    return g->index.n_usages + g->alt_index.n_usages;
+}
+
+// Does the primary surface carry a usage occurrence starting at START?  Used to
+// drop a `.cljc' file's NON-conditional cross-ns usage, which both dialect passes
+// record (in `index' and `alt_index'), so find-usages reports it once.
+static int primary_has_usage_at(FileNode *g, uint32_t start) {
+    for (size_t i = 0; i < g->index.n_usages; i++)
+        if (g->index.usages[i].start == start) return 1;
+    return 0;
+}
+
+// Match the var (CANON_NS, NAME) against one surface's usages, appending hits.
+// SKIP_DUP_OF_PRIMARY drops a usage already present in the primary surface (the
+// alt surface's non-conditional duplicates), so each occurrence is emitted once.
+static void harvest_surface_usages(emacs_env *env, FileNode *g, NsIndex *ix,
+                                   const char *canon_ns, const char *name,
+                                   size_t nlen, int skip_dup_of_primary,
+                                   emacs_value *items, size_t *k) {
+    for (size_t i = 0; i < ix->n_usages; i++) {
+        VarUsage *u = &ix->usages[i];
+        if (u->ns && strcmp(u->ns, canon_ns) == 0 &&
+            strlen(u->name) == nlen && memcmp(u->name, name, nlen) == 0) {
+            if (skip_dup_of_primary && primary_has_usage_at(g, u->start)) continue;
+            items[(*k)++] = location_to_lisp(env, g, u->start, u->end);
+        }
+    }
+}
+
 // Append G's occurrences of the var (CANON_NS, NAME[0,NLEN)) to ITEMS/*K:
-//   * if G declares CANON_NS, its def + same-ns usages (NAV_VAR by name);
-//   * any cross-ns usage of it (VarUsage whose resolved target ns == CANON_NS).
-// ITEMS must hold at least G->nnavs + G->nusages more slots.
+//   * if G declares CANON_NS, its def + same-ns usages (NAV_VAR by name, unioned
+//     + deduped across G's dialect passes);
+//   * any cross-ns usage of it (VarUsage whose resolved target ns == CANON_NS),
+//     across both of G's dialect surfaces (a `.cljc' file's cljs-only usage lives
+//     in `alt_index'), with non-conditional duplicates dropped.
+// ITEMS must hold at least G->nnavs + file_total_usages(G) more slots.
 static void harvest_matches(emacs_env *env, FileNode *g, const char *canon_ns,
                             const char *name, size_t nlen,
                             emacs_value *items, size_t *k) {
@@ -3739,12 +3988,8 @@ static void harvest_matches(emacs_env *env, FileNode *g, const char *canon_ns,
                 items[(*k)++] = location_to_lisp(env, g, nv->start, nv->end);
         }
     }
-    for (size_t i = 0; i < g->nusages; i++) {
-        VarUsage *u = &g->usages[i];
-        if (u->ns && strcmp(u->ns, canon_ns) == 0 &&
-            strlen(u->name) == nlen && memcmp(u->name, name, nlen) == 0)
-            items[(*k)++] = location_to_lisp(env, g, u->start, u->end);
-    }
+    harvest_surface_usages(env, g, &g->index, canon_ns, name, nlen, 0, items, k);
+    harvest_surface_usages(env, g, &g->alt_index, canon_ns, name, nlen, 1, items, k);
 }
 
 // (treejure-references WS FILE BYTE &optional SCOPE-DIRS) -> list of locations.
@@ -3839,8 +4084,9 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
         }
     }
 
-    // Results, grown lazily: each harvested file needs at most nnavs+nusages
-    // more slots (ENSURE reserves them before harvest_matches fills).
+    // Results, grown lazily: each harvested file needs at most nnavs +
+    // file_total_usages (both dialect surfaces) more slots (ENSURE reserves them
+    // before harvest_matches fills).
     emacs_value *items = NULL; size_t k = 0, items_cap = 0;
     #define ENSURE(extra) do { \
         if (k + (extra) > items_cap) { \
@@ -3849,7 +4095,7 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
         } } while (0)
 
     // The query file's own occurrences (always included, scope or not).
-    ENSURE(f->nnavs + f->nusages);
+    ENSURE(f->nnavs + file_total_usages(f));
     harvest_matches(env, f, canon_ns, target_name, nlen, items, &k);
 
     // Each other scope file: a live node is used as-is (never clobber live text);
@@ -3864,7 +4110,7 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
         if (strcmp(sp, f->path) == 0) continue;                   // already done
         FileNode *g = ws_find_file(ws, sp);
         if (g && g->live) {
-            ENSURE(g->nnavs + g->nusages);
+            ENSURE(g->nnavs + file_total_usages(g));
             harvest_matches(env, g, canon_ns, target_name, nlen, items, &k);
             continue;
         }
@@ -3872,7 +4118,7 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
         if (stat(sp, &st) != 0) continue;
         g = index_disk_file(ws, sp, st.st_mtime, ANALYSIS_USAGES);
         if (!g || g->opaque) continue;
-        ENSURE(g->nnavs + g->nusages);
+        ENSURE(g->nnavs + file_total_usages(g));
         harvest_matches(env, g, canon_ns, target_name, nlen, items, &k);
     }
     #undef ENSURE

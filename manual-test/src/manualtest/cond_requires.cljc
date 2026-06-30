@@ -1,15 +1,16 @@
 (ns manualtest.cond-requires
   ;; Reader-conditional requires.  A require nested in a `#?(...)' / `#?@(...)'
   ;; inside `(ns ... (:require ...))' is extracted (and linted) like a plain one,
-  ;; honoring the branch live for this file's dialect — the same single-branch
-  ;; rule the scope pass and var extraction already use.  A `.cljc' file is
-  ;; analysed as :clj here; full per-dialect :cljs coverage (seeing a `:cljs'-only
-  ;; require) is a later slice (PLAN step 4), so the conditionals below are :clj
-  ;; only.  That also keeps this byte-identical to clj-kondo: clj-kondo lints clj
-  ;; AND cljs as separate passes (no dedupe), so a require visible to BOTH
-  ;; platforms warns twice; a `:clj'-only require warns exactly once — matching
-  ;; this module's clj-only view.  The lints run on the FULL tier only (save /
-  ;; buffer-switch / `M-.', not while typing).
+  ;; honoring the branch live for each dialect.  A `.cljc' file is now analysed
+  ;; once per platform (clj + cljs), each pass building its own require surface,
+  ;; and the two passes' diagnostics are deduped: a require visible to BOTH
+  ;; platforms (non-conditional, unused) reports ONCE, and a `:clj'-only require
+  ;; reports once from the clj pass.  (This is the PLAN's "diagnostics on
+  ;; non-conditional code deduped across dialects to a single report" — a
+  ;; deliberate divergence from clj-kondo, which lints clj/cljs separately with no
+  ;; dedupe and so double-reports a both-platform finding.)  The conditionals
+  ;; below are all `:clj'-only, so each warns exactly once.  The lints run on the
+  ;; FULL tier only (save / buffer-switch / `M-.', not while typing).
   (:require
    ;; The one USED require — plain so the unconditional `str/join' usage resolves
    ;; on every platform → no warning here, and no cljs unresolved-namespace.

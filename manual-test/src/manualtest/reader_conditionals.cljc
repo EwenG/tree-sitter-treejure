@@ -1,12 +1,12 @@
 (ns manualtest.reader-conditionals)
 
 ;; A .cljc buffer: `replique-clojure-clojurec-mode' derives from
-;; `replique-clojure-mode', so the semantic layer is active.  The scope pass
-;; walks INTO reader-conditional branches, so locals used in any branch resolve
-;; correctly (no false "unused" warnings).
-;;
-;; v1 analyses every branch (it does not yet pick one dialect), which is exactly
-;; what you want for not-missing usages.
+;; `replique-clojure-mode', so the semantic layer is active.  A .cljc file is now
+;; analysed ONCE PER ACTIVE DIALECT (clj + cljs): the clj pass walks the `:clj'
+;; branches, the cljs pass the `:cljs' branches, and the two passes' diagnostics /
+;; faces / navs are unioned then deduped — non-conditional code reports once,
+;; conditional code per platform.  So a local used in EITHER branch resolves
+;; (no false "unused"), and a var defined once per platform is not a redefinition.
 
 ;; `x` is used inside both branches of the reader conditional → :local, no
 ;; warning.  `unused` is used in NEITHER → greyed + warned.
@@ -31,17 +31,19 @@
     #?(:clj  (long base)
        :cljs base)))
 
-;; --- Branch-aware var defs (Tier-1 redefined-var) ------------------------
-;; The var-definition pass honors only this file's dialect branch (`:clj` is
-;; the primary for .cljc), so a var defined once per platform is NOT a
-;; redefinition — but two defs inside the honored branch still collide.
+;; --- Per-dialect var defs (Tier-1 redefined-var) -------------------------
+;; The var-definition pass runs once per dialect into a distinct surface, so a
+;; var defined once per platform lands in two different surfaces and is NOT a
+;; redefinition — but two defs of one name inside a SINGLE platform's branch
+;; still collide in that platform's surface.
 
-;; Same name in both branches → recorded once (`:clj` only) → NO warning.
+;; Same name in each branch → recorded once per surface → NO warning.
 #?(:clj  (def per-platform 1)
    :cljs (def per-platform 2))
 
-;; Two top-level defs inside the honored `:clj` branch → REDEFINED-VAR on the
-;; second.  (The `:cljs` branch is not scanned for a .cljc file.)
+;; Two top-level defs inside the SAME `:clj` branch → REDEFINED-VAR on the second
+;; (in the clj surface).  The cljs pass sees one def → no warning; the two passes'
+;; diagnostics dedup, so this reports exactly once.
 #?(:clj  (do (def dup-in-branch 1)
              (def dup-in-branch 2))
    :cljs (def dup-in-branch 3))
