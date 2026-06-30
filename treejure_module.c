@@ -123,10 +123,19 @@ int plugin_is_GPL_compatible;
 // returns an aggregate `(:files N :diagnostics M)' summary, and leaves each
 // scanned disk file warm at ANALYSIS_USAGES so a later find-usages / jump-to-def
 // reuses it.  Per-file diagnostics still surface lazily via treejure-check-buffer.
+// A **per-pass `resolve_ns' memo** (NsCache) is threaded through analyze_file's
+// full-tier resolvers (build_require_graph + the core-ns resolution in
+// resolve_var_usages): the cold scan shares ONE memo across all files, so a
+// namespace required by many of them (`clojure.core', shared libs) is resolved at
+// most once for the whole scan rather than re-`stat'-ing the classpath per file
+// (a single-file check passes NULL -- no ns repeats within one file).  It is
+// behaviour-identical to a bare `resolve_ns' (keyed on (ns, dialect mask), with
+// skip_path re-applied on lookup; see the NsCache comment).  Because the memo
+// resolves the SKIP-FREE candidate, a self-require could otherwise re-read the
+// file currently under analysis mid-walk -- prevented by `Workspace.analyzing'
+// (index_disk_file returns the in-flight node untouched).
 //
-// What is still deferred: the per-pass `ns -> FileNode' memo for
-// resolve_var_usages (an optimization, orthogonal to the now-built find-usages
-// session cache), and the JVM oracle that supplies the real jar-inclusive
+// What is still deferred: the JVM oracle that supplies the real jar-inclusive
 // classpath enabling the gated facts above (step 6).  All positions are 0-based
 // byte offsets; Elisp converts to buffer positions on apply.
 // ---------------------------------------------------------------------------
@@ -471,6 +480,16 @@ typedef struct {
     StrMap     file_map;  // path -> FileNode* (index over `files')
     JarDir   **jar_dirs;  size_t n_jar_dirs, cap_jar_dirs;
     StrMap     jar_map;   // jar path -> JarDir* (index over `jar_dirs')
+    // The FileNode currently inside `analyze_file', or NULL.  A dependency
+    // resolution during the full tier (build_require_graph / the core-ns resolve)
+    // must never re-read THIS file from disk: its tree/text/index are live on the
+    // stack of the in-progress walk, and re-indexing it (filenode_reparse +
+    // distill_file) would delete the tree mid-walk and wipe its half-built
+    // outputs.  `resolve_ns' skips the requiring file by path, but the per-pass
+    // memo resolves the SKIP-FREE candidate (so the cached value is shareable), so
+    // a self-require would otherwise reach `index_disk_file' on the in-flight file;
+    // this guard makes `index_disk_file' return it untouched (see there).
+    FileNode  *analyzing;
 } Workspace;
 
 // --- FileNode lifecycle ---------------------------------------------------
@@ -2754,6 +2773,8 @@ static FileNode *index_disk_file(Workspace *ws, const char *path,
                                  time_t mtime, int level) {
     FileNode *f = ws_find_file(ws, path);
     if (f && f->live) return f;                               // live buffer wins
+    if (f && f == ws->analyzing) return f;   // never re-read the file under analysis
+                                             // (a self-require's skip-free resolve)
     // Cached and unchanged?  Reuse when the file is opaque (terminal -- it
     // resolves to nothing) or already analyzed to at least the requested level.
     // `indexed_mtime' is 0 for a never-indexed / reverted node, and a real disk
@@ -2952,6 +2973,94 @@ static FileNode *resolve_ns(Workspace *ws, const char *const *dirs, size_t n_dir
     return NULL;
 }
 
+// ===========================================================================
+// Per-pass `resolve_ns' memo (ns, dialect mask) -> FileNode.
+//
+// `resolve_ns' over a directory classpath `stat's each (entry x extension)
+// candidate before it finds (or fails to find) the file.  In a multi-file pass
+// -- the cold `treejure-analyze' scan, where `build_require_graph' resolves every
+// file's requires -- a namespace required by many files (`clojure.core', and
+// every shared lib) would otherwise re-`stat' the source dirs once per requiring
+// file.  This memo collapses repeats to one `resolve_ns' per (ns, mask) for the
+// lifetime of a pass.  (`resolve_ns' already caches the resolved FileNode
+// persistently in `ws->files', so the parse / jar I/O happens once regardless;
+// the memo additionally elides the repeated candidate `stat's.)  It is NOT
+// persistent: disk state can change between passes, so a fresh memo is created
+// per scan and freed at its end (a single-file check passes NULL -- no ns repeats
+// within one file, so it gets nothing from a memo, and the hot interactive path
+// stays allocation-free).
+//
+// A FileNode pointer stays valid across further indexing within a pass: nodes are
+// individually heap-allocated and interned for the session (never moved or
+// freed), and re-indexing a dep from its unchanged on-disk bytes re-derives the
+// same surface -- so caching the pointer is safe even when the dep is itself
+// re-scanned later in the same pass.
+//
+// Keyed on (ns, mask): a `.clj' (mask clj) and a `.cljs' (mask cljs) file can
+// resolve the same ns to different files (foo.clj vs foo.cljs), so the dialect
+// mask is part of the key.  The cached value is the SKIP-FREE resolution
+// (`skip_path' = NULL); `resolve_ns_memo' re-applies any caller `skip_path' on
+// top.  `skip_path' only ever removes the requiring file itself as a candidate,
+// which changes the answer solely for a self-require (the ns resolves to the very
+// file asking) -- detected as `cached->path == skip_path' and recomputed without
+// polluting the memo, so the memo is behaviour-identical to a bare `resolve_ns'.
+typedef struct {
+    char     **names;
+    unsigned  *masks;
+    FileNode **deps;
+    size_t     n, cap;
+} NsCache;
+
+static FileNode *ns_cache_lookup(NsCache *c, const char *ns, unsigned mask, int *found) {
+    for (size_t i = 0; i < c->n; i++)
+        if (c->masks[i] == mask && strcmp(c->names[i], ns) == 0) {
+            *found = 1; return c->deps[i];
+        }
+    *found = 0;
+    return NULL;
+}
+
+static void ns_cache_store(NsCache *c, const char *ns, unsigned mask, FileNode *dep) {
+    if (c->n == c->cap) {
+        c->cap = c->cap ? c->cap * 2 : 8;
+        c->names = realloc(c->names, c->cap * sizeof(char *));
+        c->masks = realloc(c->masks, c->cap * sizeof(unsigned));
+        c->deps  = realloc(c->deps,  c->cap * sizeof(FileNode *));
+    }
+    c->names[c->n] = strdup(ns);
+    c->masks[c->n] = mask;
+    c->deps[c->n]  = dep;
+    c->n++;
+}
+
+static void ns_cache_free(NsCache *c) {
+    for (size_t i = 0; i < c->n; i++) free(c->names[i]);
+    free(c->names); free(c->masks); free(c->deps);
+    c->names = NULL; c->masks = NULL; c->deps = NULL; c->n = c->cap = 0;
+}
+
+// `resolve_ns' through the per-pass memo CACHE (NULL CACHE -> resolve directly).
+// See the NsCache comment for the (ns, mask) key and the `skip_path' correctness
+// argument.
+static FileNode *resolve_ns_memo(NsCache *cache, Workspace *ws,
+                                 const char *const *dirs, size_t n_dirs,
+                                 const char *ns, unsigned mask,
+                                 const char *skip_path) {
+    if (!cache || !ns) return resolve_ns(ws, dirs, n_dirs, ns, mask, skip_path);
+    int found = 0;
+    FileNode *r0 = ns_cache_lookup(cache, ns, mask, &found);
+    if (!found) {
+        r0 = resolve_ns(ws, dirs, n_dirs, ns, mask, NULL);   // canonical: no skip
+        ns_cache_store(cache, ns, mask, r0);
+    }
+    // A self-require (the ns resolves to the file `skip_path' names) is the one
+    // case where the skip changes the answer: recompute it, leaving the canonical
+    // entry intact for every other requiring file.
+    if (r0 && skip_path && r0->path && strcmp(r0->path, skip_path) == 0)
+        return resolve_ns(ws, dirs, n_dirs, ns, mask, skip_path);
+    return r0;
+}
+
 // Resolve F's forward require graph: for each require in its NsIndex, store the
 // dependency FileNode `resolve_ns' finds over the workspace classpath (a source
 // file or a jar entry), or NULL when it does not resolve.  This is the slice
@@ -2963,16 +3072,18 @@ static FileNode *resolve_ns(Workspace *ws, const char *const *dirs, size_t n_dir
 // (unresolved-namespace, undefined var) and project-wide find-usages will read
 // these edges next (the require graph is their seed); `treejure-requires' exposes
 // them for inspection.  Skips F itself (skip_path) so a require never resolves to
-// the live buffer's stale on-disk copy.
-static void build_require_graph(Workspace *ws, FileNode *f) {
+// the live buffer's stale on-disk copy.  CACHE is the optional per-pass
+// `resolve_ns' memo (NULL for a single-file check; the cold scan shares one across
+// all files, so a shared lib is resolved at most once for the whole scan).
+static void build_require_graph(Workspace *ws, FileNode *f, NsCache *cache) {
     NsIndex *ix = &f->index;
     if (ws->n_classpath == 0) return;          // no classpath -> nothing to resolve
     unsigned mask = dialect_mask(f->path);
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *r = &ix->requires[i];
         if (!r->ns) continue;
-        r->resolved = resolve_ns(ws, (const char *const *)ws->classpath,
-                                 ws->n_classpath, r->ns, mask, f->path);
+        r->resolved = resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
+                                      ws->n_classpath, r->ns, mask, f->path);
     }
 }
 
@@ -3095,7 +3206,10 @@ static void lint_unresolved_namespace(Workspace *ws, FileNode *f) {
 // #3) is absent from the dep's distilled surface, so it would mis-flag --
 // `:lint-as'/hooks and `replique-clojure-extra-def-forms' are the escape hatch
 // until macro knowledge lands.
-static void resolve_var_usages(Workspace *ws, FileNode *f) {
+// CACHE is the optional per-pass `resolve_ns' memo (see build_require_graph):
+// the implicit core ns is resolved once per file here, but sharing the cold
+// scan's memo also collapses the core resolution across all scanned files.
+static void resolve_var_usages(Workspace *ws, FileNode *f, NsCache *cache) {
     NsIndex *ix = &f->index;
     int refer_all = has_refer_all(ix);
     // Resolve the implicit core ns at most once per pass (the hot case: every
@@ -3129,8 +3243,8 @@ static void resolve_var_usages(Workspace *ws, FileNode *f) {
             if (!core_resolved) {
                 const char *core = core_ns_for(f->path);
                 core_dep = core
-                    ? resolve_ns(ws, (const char *const *)ws->classpath,
-                                 ws->n_classpath, core, dialect_mask(f->path), f->path)
+                    ? resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
+                                      ws->n_classpath, core, dialect_mask(f->path), f->path)
                     : NULL;
                 core_resolved = 1;
             }
@@ -3160,10 +3274,17 @@ static void resolve_var_usages(Workspace *ws, FileNode *f) {
 //     `unresolved-namespace' (gated), `undefined-var' (unconditional, resolved
 //     deps only), and the `:unresolved' face (gated) -- see resolve_var_usages.
 // The fast tier stays dependency-I/O-free.  Cross-namespace jump-to-def still
-// resolves on its own in the point query (resolve_cross_ns).
-static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
+// resolves on its own in the point query (resolve_cross_ns).  CACHE is the
+// optional per-pass `resolve_ns' memo passed to the full-tier resolvers (NULL for
+// a single-file check; the cold scan threads one shared memo through every file).
+static void analyze_file(Workspace *ws, FileNode *f, int cross_file, NsCache *cache) {
     filenode_clear_outputs(f);
     if (!f->tree) return;
+    // Guard F against being re-read from disk by a dependency resolution it
+    // triggers (a self-require under the per-pass memo's skip-free resolve); see
+    // `Workspace.analyzing'.  Saved/restored so nested analysis (none today) is safe.
+    FileNode *prev_analyzing = ws->analyzing;
+    ws->analyzing = f;
     TSNode root = ts_tree_root_node(f->tree);
 
     // --- Buffer-only facts (both tiers; no dependency I/O) -----------------
@@ -3191,18 +3312,19 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file) {
         // dependencies -- the first check-time dependency I/O -- but emits no
         // diagnostic itself; it is the seed the dependency-reading Tier-2 facts
         // below consume.
-        build_require_graph(ws, f);
+        build_require_graph(ws, f, cache);
         // The dependency-reading Tier-2 facts that consume the graph: a require
         // with a NULL edge (`unresolved-namespace', gated), a qualified/`:refer'-ed
         // var its resolved dep does not define (`undefined-var', unconditional --
         // resolved deps only), and the `:unresolved' face (gated).  See the
         // section comment above resolve_var_usages for the false-positive posture.
         lint_unresolved_namespace(ws, f);
-        resolve_var_usages(ws, f);
+        resolve_var_usages(ws, f, cache);
     }
 
     if (f->nspans > 1)
         qsort(f->spans, f->nspans, sizeof(SemanticSpan), span_cmp);
+    ws->analyzing = prev_analyzing;
 }
 
 // ===========================================================================
@@ -3345,7 +3467,7 @@ static emacs_value f_check_buffer(emacs_env *env, ptrdiff_t nargs, emacs_value a
     f->live = 1;                            // text is authoritative over disk
     f->opaque = 0;                          // live text from Emacs is valid UTF-8
     filenode_reparse(ws, f, text, tlen);    // takes ownership of `text`
-    analyze_file(ws, f, cross_file);
+    analyze_file(ws, f, cross_file, NULL);  // single file: no ns repeats -> no memo
     return diagnostics_to_lisp(env, f);
 }
 
@@ -3791,8 +3913,10 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
 // Unlike the lazy index_disk_file path, the cold scan re-parses every file even
 // when mtime-fresh: a cached USAGES node has no diagnostics (they are pruned), so
 // the count is only available from a fresh full-tier analysis -- appropriate for
-// an explicit, one-shot command.
-static intmax_t analyze_scope_file(Workspace *ws, const char *path, time_t mtime) {
+// an explicit, one-shot command.  CACHE is the cold scan's shared per-pass
+// `resolve_ns' memo, threaded into analyze_file's full-tier resolvers.
+static intmax_t analyze_scope_file(Workspace *ws, const char *path, time_t mtime,
+                                   NsCache *cache) {
     FileNode *f = ws_find_file(ws, path);
     if (f && f->live) return -1;             // a live buffer: caller handles it
     size_t len; char *buf = read_file(path, &len);
@@ -3810,7 +3934,7 @@ static intmax_t analyze_scope_file(Workspace *ws, const char *path, time_t mtime
     }
     f->opaque = 0;
     filenode_reparse(ws, f, buf, len);       // takes ownership of `buf`
-    analyze_file(ws, f, 1);                   // full tier: diags + graph + lints
+    analyze_file(ws, f, 1, cache);            // full tier: diags + graph + lints
     intmax_t nd = (intmax_t)f->ndiags;
     prune_to_usages_cache(f);                 // drop heavy state, keep USAGES cache
     f->indexed_mtime = mtime;
@@ -3837,6 +3961,10 @@ static emacs_value f_analyze(emacs_env *env, ptrdiff_t nargs, emacs_value args[]
         free(dirs);
     }
 
+    // One per-pass `resolve_ns' memo shared across every file in the scan, so a
+    // namespace required by many files (`clojure.core', shared libs) is resolved
+    // at most once for the whole cold analysis (see the NsCache comment).
+    NsCache scan_cache = {0};
     size_t n_files = 0;
     uintmax_t n_diags = 0;
     for (size_t i = 0; i < scope.n; i++) {
@@ -3844,15 +3972,16 @@ static emacs_value f_analyze(emacs_env *env, ptrdiff_t nargs, emacs_value args[]
         if (i > 0 && strcmp(sp, scope.v[i - 1]) == 0) continue;   // de-dup (sorted)
         FileNode *f = ws_find_file(ws, sp);
         if (f && f->live) {                       // open analyzed buffer: in place
-            analyze_file(ws, f, 1);
+            analyze_file(ws, f, 1, &scan_cache);
             n_files++; n_diags += f->ndiags;
             continue;
         }
         struct stat st;
         if (stat(sp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-        intmax_t nd = analyze_scope_file(ws, sp, st.st_mtime);
+        intmax_t nd = analyze_scope_file(ws, sp, st.st_mtime, &scan_cache);
         if (nd >= 0) { n_files++; n_diags += (uintmax_t)nd; }
     }
+    ns_cache_free(&scan_cache);
 
     for (size_t i = 0; i < scope.n; i++) free(scope.v[i]);
     free(scope.v);
