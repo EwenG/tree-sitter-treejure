@@ -72,7 +72,8 @@
 
 ;; `M-.` on a core / library symbol (`str`, `+`, `inc`, `clojure.string/...`)
 ;; yields nothing — those live in jars, which the cross-file slice does not read
-;; yet.  `M-?` on a same-ns var is buffer-scoped only (project-wide find-usages
-;; is a later slice), so it will not find usages in OTHER files.
+;; yet.  (`M-?` is now project-wide: it prompts for a scope and lists usages
+;; across the chosen source dirs by resolved identity — e.g. `M-?` on `greet`
+;; here also finds its usages in `global_vars.clj` / `undefined_vars.clj`.)
 (defn core-symbols []
   (str (+ 1 2) (inc 3)))

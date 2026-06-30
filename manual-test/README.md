@@ -40,9 +40,19 @@ Things to watch:
       (`replique-clojure-semantic-source-dirs`, default `src`/`test`).
     - on a **core / library** symbol (`+`, `clojure.string/join`) yields nothing
       yet — those live in jars (PLAN jar slice).
-  - `M-?` (`xref-find-references`) lists in-file occurrences of the local
-    (binding + usages) or same-ns var (def + usages). Var references are
-    **buffer-scoped** for now (project-wide find-usages is a later slice).
+  - `M-?` (`xref-find-references`) lists occurrences of the local (binding +
+    usages) or var (def + usages), by resolved identity. A **local** is always
+    buffer-scoped. A **var** is **project-wide**: `M-?` prompts for a search
+    scope (project source dirs / a directory you pick / this buffer only — the
+    choice is transient, re-picked each time; the defcustom
+    `replique-clojure-semantic-references-scope` can default it to `project` or
+    `buffer` to skip the prompt) and returns every occurrence across that scope,
+    filtered by resolved identity — so an aliased `nt/greet`, the
+    fully-qualified `manualtest.nav-target/greet`, and the `:refer`-ed bare
+    `greet` all list the same set (the def in `nav_target.clj` plus usages in
+    `navigation.clj`/`global_vars.clj`/`undefined_vars.clj`/`unresolved.clj`),
+    while a same-name var in another namespace never matches. Jars are not
+    scanned.
 
 - **Dependency-reading diagnostics** (full tier — save / buffer-switch / `M-.`),
   which read the require graph:
@@ -61,8 +71,9 @@ Things to watch:
     manualtest-complete-check`); see `unresolved.clj`.
 
 What the module does **not** do yet (so don't expect it): cross-file **arity**
-checks, and project-wide **find-usages** (`M-?` is buffer-scoped for now). Those
-need later slices (PLAN step 4+/5).
+checks, and the cold full-analysis command (`treejure-analyze`). Those need
+later slices (PLAN step 5+/6). (Project-wide **find-usages** via `M-?` now works
+— see the `M-?` note above.)
 
 The forward **require graph** is built at the full tier (save / buffer-switch /
 `M-.`): each require is resolved to its dependency file over the classpath — the
