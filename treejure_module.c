@@ -117,13 +117,18 @@ int plugin_is_GPL_compatible;
 // "<jar>!<entry>" path, and Elisp opens it via `treejure-jar-entry' (a thin
 // accessor that re-reads the entry's source on demand).
 //
-// What is still deferred: the cold full analysis command (`treejure-analyze',
-// a chosen-scope scan returning a summary), the per-pass `ns -> FileNode' memo
-// for resolve_var_usages (an optimization, orthogonal to the now-built
-// find-usages session cache), and the JVM oracle that
-// supplies the real jar-inclusive classpath enabling the gated facts above
-// (step 6).  All positions are 0-based byte offsets; Elisp converts to buffer
-// positions on apply.
+// The **cold full analysis** command is built (`treejure-analyze', step 5): an
+// explicit chosen-scope scan that full-analyzes every source file under
+// SCOPE-DIRS (analyze_file at the full tier, reading the dependency closure),
+// returns an aggregate `(:files N :diagnostics M)' summary, and leaves each
+// scanned disk file warm at ANALYSIS_USAGES so a later find-usages / jump-to-def
+// reuses it.  Per-file diagnostics still surface lazily via treejure-check-buffer.
+//
+// What is still deferred: the per-pass `ns -> FileNode' memo for
+// resolve_var_usages (an optimization, orthogonal to the now-built find-usages
+// session cache), and the JVM oracle that supplies the real jar-inclusive
+// classpath enabling the gated facts above (step 6).  All positions are 0-based
+// byte offsets; Elisp converts to buffer positions on apply.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================
@@ -2668,6 +2673,38 @@ static int is_valid_utf8(const char *buf, size_t len) {
     return 1;
 }
 
+// Prune a FileNode's outputs to the find-usages session-cache SHAPE: drop the
+// live-only face spans and local navs, keeping only the NAV_VAR navs (the
+// cross-ns usages and the ns surface are left untouched).  Shared by distill_file
+// (the USAGES level) and the cold-scan analyze path, so the two never diverge on
+// what a cached USAGES node holds.
+static void prune_navs_to_usages(FileNode *f) {
+    f->nspans = 0;                       // faces: live buffer only
+    size_t w = 0;                        // keep only NAV_VAR navs
+    for (size_t i = 0; i < f->nnavs; i++) {
+        if (f->navs[i].kind == NAV_VAR) f->navs[w++] = f->navs[i];
+        else free(f->navs[i].name);      // a local: name is NULL (free is a no-op)
+    }
+    f->nnavs = w;
+}
+
+// Reduce a FileNode freshly analyzed at the FULL tier (analyze_file, cross_file=1)
+// to the ANALYSIS_USAGES session cache: drop the live-only products (diagnostics,
+// face spans, local navs) and the heavy parse state (tree + text), keeping the ns
+// surface + NAV_VAR navs + cross-ns usages that find-usages / jump-to-def / the
+// require graph read.  Used by the cold-scan analyze path after it has counted a
+// file's diagnostics, so a large scope leaves warm USAGES nodes rather than N
+// pinned parse trees.  (distill_file reaches the same shape from the other side --
+// it never produces diagnostics, so it prunes navs directly.)
+static void prune_to_usages_cache(FileNode *f) {
+    for (size_t i = 0; i < f->ndiags; i++) free(f->diags[i].message);
+    f->ndiags = 0;
+    prune_navs_to_usages(f);
+    f->analysis_level = ANALYSIS_USAGES;
+    if (f->tree) { ts_tree_delete(f->tree); f->tree = NULL; }
+    free(f->text); f->text = NULL; f->len = 0;
+}
+
 // Analyze F's current tree to LEVEL, then DROP the heavy parse state (tree +
 // text): the distilled products carry self-contained byte spans, names and the
 // file path, so the tree is never needed again.
@@ -2695,13 +2732,7 @@ static void distill_file(Workspace *ws, FileNode *f, int level) {
                        .next_local_id = 0, .cross_file = 1, .in_unbound_body = 0 };
         analyze_body(&a, root, 0);
         free(a.locals);
-        f->nspans = 0;                       // faces: live buffer only
-        size_t w = 0;                        // keep only NAV_VAR navs
-        for (size_t i = 0; i < f->nnavs; i++) {
-            if (f->navs[i].kind == NAV_VAR) f->navs[w++] = f->navs[i];
-            else free(f->navs[i].name);      // a local: name is NULL (free is a no-op)
-        }
-        f->nnavs = w;
+        prune_navs_to_usages(f);             // faces + local navs: live buffer only
     } else {
         extract_ns_name(ws, f);              // surface: ns name only
         extract_var_defs(ws, f, f->text, root, 0);       // dep: no navs
@@ -3734,6 +3765,105 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
     return res;
 }
 
+// ===========================================================================
+// Cold full analysis (build-order step 5) -- `treejure-analyze'.
+//
+// An explicit, user-initiated command that analyzes a chosen scope up front
+// (otherwise analysis stays lazy, per buffer / per query).  It collects every
+// clj-family source file under SCOPE-DIRS -- the same per-call scope model as
+// find-usages (classpath / known WS files / a picked dir, not persisted) -- and
+// runs the FULL-tier analysis (analyze_file, cross_file=1) on each: the same
+// diagnostics + require graph + dependency-reading Tier-2 lints the live
+// full-tier check runs, reading the dependency closure.  It returns only an
+// aggregate summary `(:files N :diagnostics M)'; per-file diagnostics are still
+// pulled lazily via treejure-check-buffer when a file is opened.  A scanned disk
+// file is left warm at ANALYSIS_USAGES (tree/text dropped) so a subsequent
+// find-usages / jump-to-def reuses it (the session cache); an open analyzed
+// buffer is analyzed in place and kept live.  Reads no jars beyond what the
+// require graph resolves.
+// ===========================================================================
+
+// Full-analyze the disk file at PATH for the cold scan: (re-)read + parse it, run
+// analyze_file at the full tier to count its diagnostics, then prune the node to
+// the ANALYSIS_USAGES session cache (mtime-gated) so it stays warm.  Returns the
+// diagnostic count, or -1 when the file is a live buffer (the caller analyzes
+// those in place) or could not be read as UTF-8 (marked opaque, not counted).
+// Unlike the lazy index_disk_file path, the cold scan re-parses every file even
+// when mtime-fresh: a cached USAGES node has no diagnostics (they are pruned), so
+// the count is only available from a fresh full-tier analysis -- appropriate for
+// an explicit, one-shot command.
+static intmax_t analyze_scope_file(Workspace *ws, const char *path, time_t mtime) {
+    FileNode *f = ws_find_file(ws, path);
+    if (f && f->live) return -1;             // a live buffer: caller handles it
+    size_t len; char *buf = read_file(path, &len);
+    if (!buf) return -1;
+    if (!f) f = ws_intern_file(ws, path);
+    if (!is_valid_utf8(buf, len)) {          // non-UTF-8 dep -> opaque, not counted
+        free(buf);
+        filenode_clear_outputs(f);
+        if (f->tree) { ts_tree_delete(f->tree); f->tree = NULL; }
+        free(f->text); f->text = NULL; f->len = 0;
+        f->opaque = 1;
+        f->analysis_level = ANALYSIS_NONE;
+        f->indexed_mtime = mtime;
+        return -1;
+    }
+    f->opaque = 0;
+    filenode_reparse(ws, f, buf, len);       // takes ownership of `buf`
+    analyze_file(ws, f, 1);                   // full tier: diags + graph + lints
+    intmax_t nd = (intmax_t)f->ndiags;
+    prune_to_usages_cache(f);                 // drop heavy state, keep USAGES cache
+    f->indexed_mtime = mtime;
+    return nd;
+}
+
+// (treejure-analyze WS SCOPE-DIRS) -> (:files N :diagnostics M).  See the section
+// comment above: a cold full-tier scan over the chosen scope, returning aggregate
+// counts and warming the session cache.
+static emacs_value f_analyze(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
+    Workspace *ws = env->get_user_ptr(env, args[0]);
+    if (!ws) return Qnil(env);
+
+    PathVec scope = {0};
+    size_t n_dirs; char **dirs = copy_string_seq(env, args[1], &n_dirs);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+        for (size_t i = 0; i < n_dirs; i++) free(dirs[i]);
+        free(dirs);
+        return Qnil(env);
+    }
+    if (dirs) {
+        collect_scope((const char *const *)dirs, n_dirs, &scope);
+        for (size_t i = 0; i < n_dirs; i++) free(dirs[i]);
+        free(dirs);
+    }
+
+    size_t n_files = 0;
+    uintmax_t n_diags = 0;
+    for (size_t i = 0; i < scope.n; i++) {
+        const char *sp = scope.v[i];
+        if (i > 0 && strcmp(sp, scope.v[i - 1]) == 0) continue;   // de-dup (sorted)
+        FileNode *f = ws_find_file(ws, sp);
+        if (f && f->live) {                       // open analyzed buffer: in place
+            analyze_file(ws, f, 1);
+            n_files++; n_diags += f->ndiags;
+            continue;
+        }
+        struct stat st;
+        if (stat(sp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        intmax_t nd = analyze_scope_file(ws, sp, st.st_mtime);
+        if (nd >= 0) { n_files++; n_diags += (uintmax_t)nd; }
+    }
+
+    for (size_t i = 0; i < scope.n; i++) free(scope.v[i]);
+    free(scope.v);
+
+    emacs_value pl[] = {
+        env->intern(env, ":files"),       env->make_integer(env, (intmax_t)n_files),
+        env->intern(env, ":diagnostics"), env->make_integer(env, (intmax_t)n_diags)
+    };
+    return env->funcall(env, env->intern(env, "list"), 4, pl);
+}
+
 // (treejure-requires WS FILE) -> list of (:ns NS :file PATH-or-nil) plists.
 // FILE's forward require graph as built by the last FULL-tier check: each
 // required namespace and the dependency file `resolve_ns' resolved it to over the
@@ -3862,6 +3992,7 @@ int emacs_module_init(struct emacs_runtime *ert) {
     bind_fn(env, "treejure-semantic-faces",  4, 4, f_semantic_faces);
     bind_fn(env, "treejure-definition",      3, 3, f_definition);
     bind_fn(env, "treejure-references",      3, 4, f_references);
+    bind_fn(env, "treejure-analyze",         2, 2, f_analyze);
     bind_fn(env, "treejure-requires",        2, 2, f_requires);
     bind_fn(env, "treejure-close-buffer",    2, 2, f_close_buffer);
     bind_fn(env, "treejure-jar-entry",       2, 2, f_jar_entry);
