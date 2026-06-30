@@ -1915,8 +1915,7 @@ static int has_clj_ext(const char *path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return 0;
     return strcmp(dot, ".clj") == 0 || strcmp(dot, ".cljs") == 0 ||
-           strcmp(dot, ".cljc") == 0 || strcmp(dot, ".cljd") == 0 ||
-           strcmp(dot, ".bb") == 0;
+           strcmp(dot, ".cljc") == 0;
 }
 
 // Does NS (e.g. "foo.bar-baz") munge to PATH's tail ("foo/bar_baz" before the
@@ -2222,9 +2221,7 @@ static const char *dialect_feature(const char *path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return "clj";
     if (strcmp(dot, ".cljs") == 0) return "cljs";
-    if (strcmp(dot, ".cljd") == 0) return "cljd";
-    if (strcmp(dot, ".cljr") == 0) return "cljr";
-    return "clj";   // .clj / .cljc / .bb / unknown -> clj
+    return "clj";   // .clj / .cljc / unknown -> clj
 }
 
 // The reader-conditional branch live for dialect feature FEAT ("clj"/"cljs"/
@@ -2580,16 +2577,13 @@ static int span_cmp(const void *x, const void *y) {
 // The set of platforms a file participates in, as a bitmask.  `.cljc' counts as
 // both clj and cljs; two files clash only if their platform sets overlap (so a
 // `.clj'/`.cljs' pair sharing a name is fine, but `.clj'/`.cljc' is not).
-enum { DIA_CLJ = 1, DIA_CLJS = 2, DIA_CLJR = 4, DIA_CLJD = 8 };
+enum { DIA_CLJ = 1, DIA_CLJS = 2 };
 static unsigned dialect_mask(const char *path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return DIA_CLJ;
-    if (strcmp(dot, ".clj") == 0 || strcmp(dot, ".bb") == 0) return DIA_CLJ;
     if (strcmp(dot, ".cljs") == 0) return DIA_CLJS;
     if (strcmp(dot, ".cljc") == 0) return DIA_CLJ | DIA_CLJS;
-    if (strcmp(dot, ".cljr") == 0) return DIA_CLJR;
-    if (strcmp(dot, ".cljd") == 0) return DIA_CLJD;
-    return DIA_CLJ;
+    return DIA_CLJ;   // .clj / unknown -> clj
 }
 
 // The active reader-conditional dialects of a file, primary first: a `.cljc'
@@ -2917,7 +2911,7 @@ static FileNode *index_jar_entry(Workspace *ws, const char *jar_path,
 }
 
 // Source-file extensions, longest-lived first; `bb' last (rare, clj-equivalent).
-static const char *const CLJ_EXTS[] = { ".clj", ".cljs", ".cljc", ".cljd", ".bb", 0 };
+static const char *const CLJ_EXTS[] = { ".clj", ".cljs", ".cljc", 0 };
 
 // Munge a namespace ("foo.bar-baz") to its relative file path ("foo/bar_baz").
 static void ns_to_relpath(const char *ns, char *out, size_t cap) {
@@ -3249,11 +3243,9 @@ static int looks_non_var(const char *name, size_t len) {
 }
 
 // The implicit core namespace for dialect feature FEAT (every Clojure file refers
-// it), or NULL when its core var set is not modeled.
+// it): `cljs.core' for cljs, else `clojure.core' (clj -- the only other dialect).
 static const char *core_ns_for(const char *feat) {
-    if (strcmp(feat, "cljs") == 0) return "cljs.core";
-    if (strcmp(feat, "clj") == 0)  return "clojure.core";
-    return NULL;   // cljr/cljd: core var set not modeled yet -> never flag bare
+    return strcmp(feat, "cljs") == 0 ? "cljs.core" : "clojure.core";
 }
 
 // Any require that brings vars in by a wildcard (`:refer :all' / bare `:use')?
@@ -3325,18 +3317,15 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsIndex *ix,
             if (cstr_in_set(use->name, nlen, CORE_FORMS)) continue;  // special form
             if (!core_resolved) {
                 const char *core = core_ns_for(feat);
-                core_dep = core
-                    ? resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
-                                      ws->n_classpath, core, mask, f->path)
-                    : NULL;
+                core_dep = resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
+                                           ws->n_classpath, core, mask, f->path);
                 core_resolved = 1;
             }
             // If the implicit core ns is not resolvable -- a partial/misconfigured
-            // "complete" classpath, or a dialect whose core we do not model
-            // (cljr/cljd, or cljs with no cljs.core on the path) -- we cannot tell
-            // a core var from a genuine unknown, so suppress the face entirely
-            // rather than flag every bare core symbol.  A truly complete classpath
-            // resolves its core, so a real unknown is still painted.
+            // "complete" classpath, or cljs with no cljs.core on the path -- we
+            // cannot tell a core var from a genuine unknown, so suppress the face
+            // entirely rather than flag every bare core symbol.  A truly complete
+            // classpath resolves its core, so a real unknown is still painted.
             if (!core_dep || core_dep->opaque) continue;
             if (dep_defines_var(dep_surface(core_dep, mask), use->name, nlen))
                 continue;                                            // a core var
@@ -3875,14 +3864,17 @@ static emacs_value f_definition(emacs_env *env, ptrdiff_t nargs, emacs_value arg
 // consumer (the classpath, the known WS files, or a picked dir -- see the
 // search-scope note in PLAN); nothing about it is persisted.  Each scope file
 // is read + walked by the SAME buffer-only scope pass the live check uses
-// (analyze_file_usages), then matched: a file declaring the canonical ns
-// contributes its def + same-ns usages (NAV_VAR by name); ANY file contributes
-// its cross-ns usages whose alias/refer-resolved target ns equals the canonical
-// ns (VarUsage).  Both are buffer-determinable -- the scan reaches no
-// `resolve_ns' beyond the one point query that fixes the identity, and reads no
-// jars.  This is the PLAN's "global var-usages index, a one-time scan deferred
-// to first use"; here it is recomputed per call (an explicit, user-initiated
-// command, not the hot path) -- a session cache is a later optimization.
+// (`index_disk_file' -> `distill_file' at the ANALYSIS_USAGES level), then
+// matched: a file declaring the canonical ns contributes its def + same-ns
+// usages (NAV_VAR by name); ANY file contributes its cross-ns usages whose
+// alias/refer-resolved target ns equals the canonical ns (VarUsage).  Both are
+// buffer-determinable -- the scan reaches no `resolve_ns' beyond the one point
+// query that fixes the identity, and reads no jars.  This is the PLAN's "global
+// var-usages index, a one-time scan deferred to first use"; the cross-file
+// MATCHING is recomputed per call (an explicit, user-initiated command, not the
+// hot path), but each scanned file's distilled navs/usages are CACHED in its
+// FileNode (mtime-gated, ANALYSIS_USAGES -- the session cache), so a repeat scan
+// reuses the parsed surface with no re-parse.
 // ===========================================================================
 
 // A growable list of file paths (the collected scope).
