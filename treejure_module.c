@@ -316,6 +316,10 @@ typedef struct {
                                    // the var surface for resolution/navigation, but
                                    // ignored by `redefined-var' (it is not a literal
                                    // re-def of a hand-written name -- clj-kondo parity)
+    int is_macro;                  // defined by `defmacro' -- the only var kind a
+                                   // ClojureScript requirer may reach on the CLJ side
+                                   // (through a macro alias/refer or implicit macro
+                                   // loading), so clj-side resolution checks this
 } VarDef;
 
 // An alias -> namespace mapping (`[lib :as a]` / `:as-alias`) and a referred
@@ -374,6 +378,22 @@ typedef struct {
     size_t n_refers, cap_refers;
     VarUsage *usages;
     size_t n_usages, cap_usages;
+    // The macro world (a SEPARATE require/alias/refer graph), for ClojureScript's
+    // `:require-macros'/`:use-macros' clauses and the `:refer-macros'/
+    // `:include-macros' options on a `:require' spec.  Kept parallel to -- never
+    // merged with -- the runtime arrays above, because a macro namespace shares
+    // its NAME with the runtime namespace yet resolves to a DIFFERENT file on the
+    // *clj* side (macros live in `.clj'/`.cljc', never `.cljs'): folding them into
+    // one ns-name keyspace makes the string-keyed consumers (`find_require_by_ns',
+    // the require-graph resolve, the `mark_*_used' family) cross-resolve the two.
+    // These are always resolved with the `DIA_CLJ' mask (build_require_graph) and
+    // consulted as a fallback surface by the resolvers (resolve_var_usages).
+    ReqSpec *macro_requires;
+    size_t n_macro_requires, cap_macro_requires;
+    AliasEntry *macro_aliases;
+    size_t n_macro_aliases, cap_macro_aliases;
+    ReferEntry *macro_refers;
+    size_t n_macro_refers, cap_macro_refers;
 } NsIndex;
 
 // ===========================================================================
@@ -581,6 +601,18 @@ static void nsindex_clear(NsIndex *ix) {
         free(ix->refers[i].ns);
     }
     ix->n_refers = 0;
+    for (size_t i = 0; i < ix->n_macro_requires; i++) free(ix->macro_requires[i].ns);
+    ix->n_macro_requires = 0;
+    for (size_t i = 0; i < ix->n_macro_aliases; i++) {
+        free(ix->macro_aliases[i].alias);
+        free(ix->macro_aliases[i].ns);
+    }
+    ix->n_macro_aliases = 0;
+    for (size_t i = 0; i < ix->n_macro_refers; i++) {
+        free(ix->macro_refers[i].name);
+        free(ix->macro_refers[i].ns);
+    }
+    ix->n_macro_refers = 0;
     for (size_t i = 0; i < ix->n_usages; i++) {
         free(ix->usages[i].ns);
         free(ix->usages[i].name);
@@ -606,6 +638,9 @@ static void nsindex_free_arrays(NsIndex *ix) {
     free(ix->aliases);
     free(ix->refers);
     free(ix->usages);
+    free(ix->macro_requires);
+    free(ix->macro_aliases);
+    free(ix->macro_refers);
 }
 
 static void filenode_free(FileNode *f) {
@@ -961,16 +996,27 @@ static void pop_scope(Analyzer *a, size_t mark) {
 // qualified symbol -- matching clj-kondo (plain quote / discard / single-colon
 // `:alias/kw' do NOT count, and a plain or `:as-alias' require is never flagged).
 
-// Mark every require whose resolved namespace equals NS as used.
+// Mark every require in REQS[0,N) whose resolved namespace equals NS as used.
+static void mark_reqs_used(ReqSpec *reqs, size_t n, const char *ns) {
+    for (size_t i = 0; i < n; i++)
+        if (reqs[i].ns && strcmp(reqs[i].ns, ns) == 0)
+            reqs[i].used = 1;
+}
+
+// Mark every require whose resolved namespace equals NS as used -- across BOTH
+// the runtime and macro require graphs.  A usage site cannot generally tell a
+// macro reference from a runtime one, so a match marks the same-named require
+// used in either world; this is deliberately lenient (it can miss an unused
+// macro/runtime require, never falsely flag one).
 static void mark_req_ns_used(NsIndex *ix, const char *ns) {
-    for (size_t i = 0; i < ix->n_requires; i++)
-        if (ix->requires[i].ns && strcmp(ix->requires[i].ns, ns) == 0)
-            ix->requires[i].used = 1;
+    mark_reqs_used(ix->requires, ix->n_requires, ns);
+    mark_reqs_used(ix->macro_requires, ix->n_macro_requires, ns);
 }
 
 // A namespace qualifier Q[0,QLEN) was used (a symbol's `ns/' part, or a `::'
-// keyword's namespace): resolve it through the aliases, else treat it as a
-// literal fully-qualified ns; either way mark the matching require(s) used.
+// keyword's namespace): resolve it through the aliases (runtime, then macro),
+// else treat it as a literal fully-qualified ns; either way mark the matching
+// require(s) used across both worlds.
 static void mark_ns_qualifier_used(NsIndex *ix, const char *q, size_t qlen) {
     for (size_t i = 0; i < ix->n_aliases; i++)
         if (strlen(ix->aliases[i].alias) == qlen &&
@@ -978,20 +1024,36 @@ static void mark_ns_qualifier_used(NsIndex *ix, const char *q, size_t qlen) {
             mark_req_ns_used(ix, ix->aliases[i].ns);
             return;
         }
+    for (size_t i = 0; i < ix->n_macro_aliases; i++)
+        if (strlen(ix->macro_aliases[i].alias) == qlen &&
+            memcmp(ix->macro_aliases[i].alias, q, qlen) == 0) {
+            mark_req_ns_used(ix, ix->macro_aliases[i].ns);
+            return;
+        }
     for (size_t i = 0; i < ix->n_requires; i++) // literal fully-qualified use
         if (ix->requires[i].ns && strlen(ix->requires[i].ns) == qlen &&
             memcmp(ix->requires[i].ns, q, qlen) == 0)
             ix->requires[i].used = 1;
+    for (size_t i = 0; i < ix->n_macro_requires; i++)
+        if (ix->macro_requires[i].ns && strlen(ix->macro_requires[i].ns) == qlen &&
+            memcmp(ix->macro_requires[i].ns, q, qlen) == 0)
+            ix->macro_requires[i].used = 1;
 }
 
-// A bare NAME[0,LEN) was used; if it is a `:refer'-ed/`:only' var, mark that
-// referred var (and its providing require) used.
+// A bare NAME[0,LEN) was used; if it is a `:refer'-ed/`:only' var (runtime or
+// macro), mark that referred var (and its providing require) used.
 static void mark_refer_used(NsIndex *ix, const char *name, size_t len) {
     for (size_t i = 0; i < ix->n_refers; i++)
         if (strlen(ix->refers[i].name) == len &&
             memcmp(ix->refers[i].name, name, len) == 0) {
             ix->refers[i].used = 1;
             mark_req_ns_used(ix, ix->refers[i].ns);
+        }
+    for (size_t i = 0; i < ix->n_macro_refers; i++)
+        if (strlen(ix->macro_refers[i].name) == len &&
+            memcmp(ix->macro_refers[i].name, name, len) == 0) {
+            ix->macro_refers[i].used = 1;
+            mark_req_ns_used(ix, ix->macro_refers[i].ns);
         }
 }
 
@@ -1030,6 +1092,18 @@ static void resolve_bare_var(Analyzer *a, uint32_t ss, uint32_t se,
             mark_req_ns_used(ix, ix->refers[i].ns);
             if (!matched_refer) {
                 refer_ns = ix->refers[i].ns;
+                matched_refer = 1;
+            }
+        }
+    // A `:refer-macros'/`:require-macros :refer' name is likewise a known cross-ns
+    // (macro) target -- its providing ns resolves on the clj side.
+    for (size_t i = 0; i < ix->n_macro_refers; i++)
+        if (strlen(ix->macro_refers[i].name) == len &&
+            memcmp(ix->macro_refers[i].name, name, len) == 0) {
+            ix->macro_refers[i].used = 1;
+            mark_req_ns_used(ix, ix->macro_refers[i].ns);
+            if (!matched_refer) {
+                refer_ns = ix->macro_refers[i].ns;
                 matched_refer = 1;
             }
         }
@@ -1080,13 +1154,23 @@ static void resolve_qualified_ref(Analyzer *a, TSNode sym, TSNode nm) {
     uint32_t ss = ts_node_start_byte(sym), se = ts_node_end_byte(sym);
     const char *tns = q;
     size_t tlen = qlen;
+    int aliased = 0;
     for (size_t i = 0; i < ix->n_aliases; i++)
         if (strlen(ix->aliases[i].alias) == qlen &&
             memcmp(ix->aliases[i].alias, q, qlen) == 0) {
             tns = ix->aliases[i].ns;
             tlen = strlen(tns);
+            aliased = 1;
             break;
         }
+    if (!aliased) // a macro alias (`:require-macros [m :as a]') resolves too
+        for (size_t i = 0; i < ix->n_macro_aliases; i++)
+            if (strlen(ix->macro_aliases[i].alias) == qlen &&
+                memcmp(ix->macro_aliases[i].alias, q, qlen) == 0) {
+                tns = ix->macro_aliases[i].ns;
+                tlen = strlen(tns);
+                break;
+            }
     uint32_t na = ts_node_start_byte(nm), nb = ts_node_end_byte(nm);
     push_usage(ix, ss, se, tns, tlen, a->text + na, nb - na);
 }
@@ -1753,10 +1837,18 @@ static void analyze_node(Analyzer *a, TSNode node) {
         // form / core macro reads as `:special-form'.  Classifying here -- and
         // walking the body from index 1 below -- examines the head exactly once.
         int core = 0;
-        if (is_extra_def_form(a->ws, a->text, head))
+        if (is_extra_def_form(a->ws, a->text, head)) {
             push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
                       CAT_MACRO_INVOCATION);
-        else if ((core = name_in(a->text, head, CORE_FORMS)))
+            // The head IS a usage of the macro (e.g. a `:refer'-ed def-form macro
+            // used as `(defcomponent ...)').  The def-form dispatch below consumes
+            // the head specially and never resolves it as a var, so mark its
+            // refer/require used here -- else the `:refer' reads as unused.
+            TSNode hnm = field_name_node(head);
+            if (!ts_node_is_null(hnm))
+                mark_refer_used(a->ix, a->text + ts_node_start_byte(hnm),
+                                ts_node_end_byte(hnm) - ts_node_start_byte(hnm));
+        } else if ((core = name_in(a->text, head, CORE_FORMS)))
             push_span(a->f, ts_node_start_byte(head), ts_node_end_byte(head),
                       CAT_SPECIAL_FORM);
         // `(quote ...)` is pure data (like the `'...` reader node).  `(var x)`
@@ -1896,18 +1988,23 @@ static char *with_prefix(const char *prefix, char *name) {
     return r;
 }
 
-static void push_req(NsIndex *ix, char *ns, uint32_t s, uint32_t e,
-                     int refer_all, int from_use) {
-    if (ix->n_requires == ix->cap_requires) {
-        ix->cap_requires = ix->cap_requires ? ix->cap_requires * 2 : 8;
-        ix->requires = realloc(ix->requires, ix->cap_requires * sizeof(ReqSpec));
+// Append a require (consuming NS) and return the slot so the caller can set the
+// eligibility flags.  MACRO selects the macro-world array (`:require-macros' /
+// `:refer-macros' / `:include-macros' targets, resolved on the clj side), else
+// the runtime array.  has_alias / has_refer_vec / used default 0; the scope pass
+// sets `used', and `resolved' (the forward edge) is NULL until build_require_graph.
+static ReqSpec *push_req(NsIndex *ix, int macro, char *ns, uint32_t s, uint32_t e,
+                         int refer_all, int from_use) {
+    ReqSpec **arr = macro ? &ix->macro_requires : &ix->requires;
+    size_t *n = macro ? &ix->n_macro_requires : &ix->n_requires;
+    size_t *cap = macro ? &ix->cap_macro_requires : &ix->cap_requires;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *arr = realloc(*arr, *cap * sizeof(ReqSpec));
     }
-    // has_alias / has_refer_vec / used default 0 here; parse_lib_spec sets the
-    // eligibility flags on the vector branch, and the scope pass sets `used'.
-    // `resolved' (the forward require-graph edge) is NULL until the full check's
-    // build_require_graph populates it.
-    ix->requires[ix->n_requires++] =
-        (ReqSpec){ns, s, e, refer_all, from_use, 0, 0, 0, 0, NULL};
+    ReqSpec *slot = &(*arr)[(*n)++];
+    *slot = (ReqSpec){ns, s, e, refer_all, from_use, 0, 0, 0, 0, NULL};
+    return slot;
 }
 
 static void push_var(NsIndex *ix, char *name, uint32_t ns, uint32_t ne,
@@ -1921,22 +2018,30 @@ static void push_var(NsIndex *ix, char *name, uint32_t ns, uint32_t ne,
         (VarDef){name, ns, ne, ds, de, private, declared, synthesized};
 }
 
-// Record an alias / referred-var mapping (both args are duplicated).
-static void push_alias(NsIndex *ix, const char *text, TSNode sym, const char *ns) {
-    if (ix->n_aliases == ix->cap_aliases) {
-        ix->cap_aliases = ix->cap_aliases ? ix->cap_aliases * 2 : 8;
-        ix->aliases = realloc(ix->aliases, ix->cap_aliases * sizeof(AliasEntry));
+// Record an alias / referred-var mapping (both args are duplicated).  MACRO
+// selects the macro-world array (`:require-macros'/`:refer-macros'), else runtime.
+static void push_alias(NsIndex *ix, int macro, const char *text, TSNode sym,
+                       const char *ns) {
+    AliasEntry **arr = macro ? &ix->macro_aliases : &ix->aliases;
+    size_t *n = macro ? &ix->n_macro_aliases : &ix->n_aliases;
+    size_t *cap = macro ? &ix->cap_macro_aliases : &ix->cap_aliases;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *arr = realloc(*arr, *cap * sizeof(AliasEntry));
     }
-    ix->aliases[ix->n_aliases++] =
-        (AliasEntry){node_text_dup(text, sym), strdup(ns)};
+    (*arr)[(*n)++] = (AliasEntry){node_text_dup(text, sym), strdup(ns)};
 }
 
-static void push_refer(NsIndex *ix, const char *text, TSNode sym, const char *ns) {
-    if (ix->n_refers == ix->cap_refers) {
-        ix->cap_refers = ix->cap_refers ? ix->cap_refers * 2 : 16;
-        ix->refers = realloc(ix->refers, ix->cap_refers * sizeof(ReferEntry));
+static void push_refer(NsIndex *ix, int macro, const char *text, TSNode sym,
+                       const char *ns) {
+    ReferEntry **arr = macro ? &ix->macro_refers : &ix->refers;
+    size_t *n = macro ? &ix->n_macro_refers : &ix->n_refers;
+    size_t *cap = macro ? &ix->cap_macro_refers : &ix->cap_refers;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 16;
+        *arr = realloc(*arr, *cap * sizeof(ReferEntry));
     }
-    ix->refers[ix->n_refers++] =
+    (*arr)[(*n)++] =
         (ReferEntry){node_text_dup(text, sym), strdup(ns),
                      ts_node_start_byte(sym), ts_node_end_byte(sym), 0};
 }
@@ -1944,14 +2049,18 @@ static void push_refer(NsIndex *ix, const char *text, TSNode sym, const char *ns
 // Parse one lib spec (symbol | vector | prefix-list) into IX.  PREFIX is the
 // enclosing prefix-list parent (or NULL); FROM_USE marks a `:use` clause, whose
 // specs refer everything unless narrowed by `:only`/`:refer`.
+// MACRO routes the spec into the macro-world arrays (a `:require-macros' /
+// `:use-macros' clause).  A runtime `:require' spec (MACRO == 0) may still carry
+// cljs macro OPTIONS -- `:refer-macros [..]' / `:include-macros true' -- which
+// spill a same-named macro require (+ its alias/refers) into the macro world.
 static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
-                           const char *prefix, int from_use) {
+                           const char *prefix, int from_use, int macro) {
     spec = unwrap_meta(spec);
     if (ts_node_is_null(spec)) return;
 
     if (type_is(spec, "symbol")) {
         char *ns = with_prefix(prefix, node_text_dup(text, spec));
-        push_req(ix, ns, ts_node_start_byte(spec), ts_node_end_byte(spec),
+        push_req(ix, macro, ns, ts_node_start_byte(spec), ts_node_end_byte(spec),
                  from_use, from_use);
         return;
     }
@@ -1965,6 +2074,11 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
         // `:as-alias' (keyword-only) and a plain spec do NOT -- matching
         // clj-kondo (an `:as-alias' / plain require is never flagged unused).
         int has_alias = 0, has_refer_vec = 0, as_alias = 0;
+        // Macro-world spill from a runtime `:require' spec (MACRO == 0 only):
+        // whether a same-named clj-side macro require is wanted, its refer-vec
+        // eligibility, and the `:as' alias to carry over (for `:include-macros').
+        int m_wants_req = 0, m_has_refer_vec = 0, m_have_alias = 0;
+        TSNode m_alias_sym = lib; // valid only when m_have_alias
         uint32_t k = 1;
         TSNode opt;
         while (!ts_node_is_null(opt = nth_form(spec, k))) {
@@ -1972,8 +2086,13 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
             if (type_is(ou, "keyword")) {
                 if (kw_name_eq(text, ou, "as") || kw_name_eq(text, ou, "as-alias")) {
                     TSNode al = unwrap_meta(nth_form(spec, k + 1));
-                    if (!ts_node_is_null(al) && type_is(al, "symbol"))
-                        push_alias(ix, text, al, ns);
+                    if (!ts_node_is_null(al) && type_is(al, "symbol")) {
+                        push_alias(ix, macro, text, al, ns);
+                        if (!macro && kw_name_eq(text, ou, "as")) {
+                            m_alias_sym = al; // carried to the macro world if wanted
+                            m_have_alias = 1;
+                        }
+                    }
                     if (kw_name_eq(text, ou, "as"))
                         has_alias = 1;
                     else
@@ -1993,10 +2112,36 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
                         TSNode rs; // referred var names
                         while (!ts_node_is_null(rs = nth_form(v, r))) {
                             TSNode ru = unwrap_meta(rs);
-                            if (type_is(ru, "symbol")) push_refer(ix, text, ru, ns);
+                            if (type_is(ru, "symbol")) push_refer(ix, macro, text, ru, ns);
                             r++;
                         }
                     }
+                    k += 2;
+                    continue;
+                }
+                // cljs macro options carried on a runtime `:require' spec: each
+                // spills a macro require (resolved clj-side) of the SAME ns.
+                if (!macro && kw_name_eq(text, ou, "refer-macros")) {
+                    TSNode v = unwrap_meta(nth_form(spec, k + 1));
+                    if (!ts_node_is_null(v) && type_is(v, "vector_literal")) {
+                        m_wants_req = 1;
+                        m_has_refer_vec = 1;
+                        uint32_t r = 0;
+                        TSNode rs;
+                        while (!ts_node_is_null(rs = nth_form(v, r))) {
+                            TSNode ru = unwrap_meta(rs);
+                            if (type_is(ru, "symbol")) push_refer(ix, 1, text, ru, ns);
+                            r++;
+                        }
+                    }
+                    k += 2;
+                    continue;
+                }
+                if (!macro && kw_name_eq(text, ou, "include-macros")) {
+                    TSNode v = unwrap_meta(nth_form(spec, k + 1));
+                    if (!ts_node_is_null(v) && type_is(v, "boolean") &&
+                        node_text_eq(text, v, "true"))
+                        m_wants_req = 1;
                     k += 2;
                     continue;
                 }
@@ -2005,11 +2150,23 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
             }
             k++;
         }
-        push_req(ix, ns, ts_node_start_byte(lib), ts_node_end_byte(lib),
-                 refer_all, from_use);
-        ix->requires[ix->n_requires - 1].has_alias = has_alias;
-        ix->requires[ix->n_requires - 1].has_refer_vec = has_refer_vec;
-        ix->requires[ix->n_requires - 1].as_alias = as_alias;
+        ReqSpec *rq = push_req(ix, macro, ns, ts_node_start_byte(lib),
+                               ts_node_end_byte(lib), refer_all, from_use);
+        rq->has_alias = has_alias;
+        rq->has_refer_vec = has_refer_vec;
+        rq->as_alias = as_alias;
+        // Spill the clj-side macro require for `:refer-macros'/`:include-macros'.
+        // `:include-macros true' loads the macro ns under the runtime `:as' alias,
+        // so carry that alias over too.
+        if (m_wants_req) {
+            ReqSpec *mrq = push_req(ix, 1, strdup(ns), ts_node_start_byte(lib),
+                                    ts_node_end_byte(lib), 0, 0);
+            mrq->has_refer_vec = m_has_refer_vec;
+            if (m_have_alias) {
+                push_alias(ix, 1, text, m_alias_sym, ns);
+                mrq->has_alias = 1;
+            }
+        }
         return;
     }
     if (type_is(spec, "list_literal")) {
@@ -2020,7 +2177,7 @@ static void parse_lib_spec(NsIndex *ix, const char *text, TSNode spec,
         uint32_t k = 1;
         TSNode child;
         while (!ts_node_is_null(child = nth_form(spec, k))) {
-            parse_lib_spec(ix, text, child, newpref, from_use);
+            parse_lib_spec(ix, text, child, newpref, from_use, macro);
             k++;
         }
         free(newpref);
@@ -2063,7 +2220,7 @@ static int ns_path_matches(const char *ns, const char *path) {
 // `:cljs'-only require enters its cljs surface.  A non-conditional spec goes
 // straight to parse_lib_spec.
 static void parse_require_spec(NsIndex *ix, const char *text, const char *feat,
-                               TSNode spec, int from_use) {
+                               TSNode spec, int from_use, int macro) {
     TSNode u = unwrap_meta(spec);
     if (ts_node_is_null(u)) return;
     if (type_is(u, "reader_conditional")) {
@@ -2076,14 +2233,14 @@ static void parse_require_spec(NsIndex *ix, const char *text, const char *feat,
             if (type_is(bv, "vector_literal")) {
                 TSNode el;
                 for (uint32_t i = 0; !ts_node_is_null(el = nth_form(bv, i)); i++)
-                    parse_require_spec(ix, text, feat, el, from_use);
+                    parse_require_spec(ix, text, feat, el, from_use, macro);
             }
             return;
         }
-        parse_require_spec(ix, text, feat, branch, from_use); // `#?': one spec
+        parse_require_spec(ix, text, feat, branch, from_use, macro); // `#?': one spec
         return;
     }
-    parse_lib_spec(ix, text, u, NULL, from_use);
+    parse_lib_spec(ix, text, u, NULL, from_use, macro);
 }
 
 // Walk the `(ns ...)` form NS_LIST into F's NsIndex: record the ns name, check
@@ -2114,28 +2271,28 @@ static void analyze_ns_form(FileNode *f, NsIndex *ix, const char *text,
             if (!ts_node_is_null(head) && type_is(head, "keyword")) {
                 int is_req = kw_name_eq(text, head, "require");
                 int is_use = kw_name_eq(text, head, "use");
+                // cljs macro clauses: routed into the SEPARATE macro-world arrays
+                // and resolved on the clj side (build_require_graph), so they never
+                // collide with a same-named runtime require in the ns-string-keyed
+                // consumers (`find_require_by_ns', the require-graph resolve, the
+                // `mark_*_used' family).  The `:refer-macros'/`:include-macros'
+                // OPTIONS on a `:require' spec are handled inside parse_lib_spec.
+                int is_reqm = kw_name_eq(text, head, "require-macros");
+                int is_usem = kw_name_eq(text, head, "use-macros");
                 // Intentionally NOT handled here -- each needs a consumer not yet
                 // built, so tracking them now would be untested, unconsumed index:
                 //   * `:import' (Java/JS classes) -> interop resolution;
                 //   * `:refer-clojure :exclude'    -> core-var exclusion (feeds the
-                //     gated undefined-var / `:unresolved' facts);
-                //   * `:require-macros' (cljs)     -> deferred cljs-specific
-                //     support (this version targets clj).  It cannot just be folded
-                //     into `:require': a macro ns lives on the *clj* side (a
-                //     different dialect mask) and shares its name with the runtime
-                //     ns, so the ns-string-keyed consumers (`find_require_by_ns',
-                //     the require graph's dialect resolve, the `mark_*_used' family)
-                //     would cross-resolve the two and mis-fire undefined-var /
-                //     unresolved-namespace / unused-namespace.  Handle it properly
-                //     with macros-aware require records + clj-side resolution, not
-                //     as a half-measure.
-                if (is_req || is_use) {
+                //     gated undefined-var / `:unresolved' facts).
+                if (is_req || is_use || is_reqm || is_usem) {
+                    int from_use = is_use || is_usem;
+                    int macro = is_reqm || is_usem;
                     uint32_t j = 1;
                     TSNode spec;
                     while (!ts_node_is_null(spec = nth_form(cu, j))) {
                         // skip trailing flag keywords (:reload, :verbose, ...)
                         if (!type_is(unwrap_meta(spec), "keyword"))
-                            parse_require_spec(ix, text, feat, spec, is_use);
+                            parse_require_spec(ix, text, feat, spec, from_use, macro);
                         j++;
                     }
                 }
@@ -2319,6 +2476,12 @@ static void record_var_def(FileNode *f, NsIndex *ix, const char *text, TSNode u,
     // The primary var: the protocol/interface/type/var name itself.
     intern_var(f, ix, text + na, nb - na, ns, ne, ds, de, private,
                0 /*declared*/, 0 /*synthesized*/, record_navs);
+    // Flag `defmacro' on the just-interned primary var, so ClojureScript clj-side
+    // resolution (macro alias/refer + implicit macro loading) can distinguish a
+    // reachable macro from an unreachable clj fn.  Secondary/declared vars are
+    // never macros (their `is_macro' stays 0).
+    if (ix->n_vars > 0 && sym_name_eq(text, head, "defmacro"))
+        ix->vars[ix->n_vars - 1].is_macro = 1;
 
     // Secondary vars some forms synthesize (see the function comment).
     if (sym_name_eq(text, head, "defprotocol") ||
@@ -2478,6 +2641,36 @@ static void lint_redefined_var(FileNode *f, NsIndex *ix) {
     }
 }
 
+// Is namespace NS required AND marked used in surface SIB (either graph)?  Used
+// to spare a `.cljc' file a false unused-namespace when the same require is used
+// only on the OTHER platform's branch.
+static int ns_required_used_in(NsIndex *sib, const char *ns) {
+    if (!ns) return 0;
+    for (size_t i = 0; i < sib->n_requires; i++)
+        if (sib->requires[i].used && sib->requires[i].ns &&
+            strcmp(sib->requires[i].ns, ns) == 0)
+            return 1;
+    for (size_t i = 0; i < sib->n_macro_requires; i++)
+        if (sib->macro_requires[i].used && sib->macro_requires[i].ns &&
+            strcmp(sib->macro_requires[i].ns, ns) == 0)
+            return 1;
+    return 0;
+}
+
+// Is a `:refer'-ed var NAME (from ns NS) marked used in surface SIB (either
+// graph)?  The OTHER-platform counterpart of the `used' flag, for a `.cljc'.
+static int refer_used_in(NsIndex *sib, const char *name, const char *ns) {
+    for (size_t i = 0; i < sib->n_refers; i++)
+        if (sib->refers[i].used && strcmp(sib->refers[i].name, name) == 0 &&
+            (!ns || !sib->refers[i].ns || strcmp(sib->refers[i].ns, ns) == 0))
+            return 1;
+    for (size_t i = 0; i < sib->n_macro_refers; i++)
+        if (sib->macro_refers[i].used && strcmp(sib->macro_refers[i].name, name) == 0 &&
+            (!ns || !sib->macro_refers[i].ns || strcmp(sib->macro_refers[i].ns, ns) == 0))
+            return 1;
+    return 0;
+}
+
 // `unused-namespace' + `unused-referred-var' (buffer-determinable): a required
 // ns whose alias / `:refer'-ed vars / fully-qualified name is never used in the
 // file, and each `:refer'-ed / `:only' var never used.  The scope pass set the
@@ -2486,11 +2679,20 @@ static void lint_redefined_var(FileNode *f, NsIndex *ix) {
 // only an `:as'-aliased or `:refer'/`:only' require is eligible.  Reads no
 // dependencies: this is buffer-only, just emitted in the full check so it does
 // not flash during the after-edit check.
-static void lint_unused_requires(FileNode *f, NsIndex *ix) {
+//
+// SIB is the file's OTHER dialect surface (a `.cljc' is analyzed once per
+// platform), or NULL for a single-dialect file.  A require / referred var used on
+// EITHER platform is used, so a non-conditional `:require' whose var is consumed
+// only in a `#?(:cljs ...)' branch must not read as unused in the clj pass (and
+// vice versa) -- SIB carries the other pass's `used' flags.  This runs once per
+// surface after BOTH passes complete (so SIB's flags are populated); the two
+// per-surface calls emit a truly-unused entry twice, collapsed by `dedup_diags'.
+static void lint_unused_requires(FileNode *f, NsIndex *ix, NsIndex *sib) {
     for (size_t i = 0; i < ix->n_requires; i++) {
         ReqSpec *r = &ix->requires[i];
         if (r->used || r->refer_all) continue;
         if (!r->has_alias && !r->has_refer_vec) continue; // plain / :as-alias
+        if (sib && ns_required_used_in(sib, r->ns)) continue; // used on the other platform
         push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_NAMESPACE,
                   msg_printf("namespace %s is required but never used",
                              r->ns ? r->ns : "?"));
@@ -2498,6 +2700,28 @@ static void lint_unused_requires(FileNode *f, NsIndex *ix) {
     for (size_t i = 0; i < ix->n_refers; i++) {
         ReferEntry *r = &ix->refers[i];
         if (r->used) continue;
+        if (sib && refer_used_in(sib, r->name, r->ns)) continue;
+        push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_REFERRED_VAR,
+                  msg_printf("referred var %s/%s is never used",
+                             r->ns ? r->ns : "?", r->name));
+    }
+    // The macro world mirrors the runtime unused lints: an aliased / `:refer'-ed
+    // macro require whose alias / macro vars are never used, and each unused
+    // referred macro.  (`mark_req_ns_used' is lenient across the two worlds, so
+    // these can miss but never falsely flag -- see its comment.)
+    for (size_t i = 0; i < ix->n_macro_requires; i++) {
+        ReqSpec *r = &ix->macro_requires[i];
+        if (r->used || r->refer_all) continue;
+        if (!r->has_alias && !r->has_refer_vec) continue;
+        if (sib && ns_required_used_in(sib, r->ns)) continue;
+        push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_NAMESPACE,
+                  msg_printf("namespace %s is required but never used",
+                             r->ns ? r->ns : "?"));
+    }
+    for (size_t i = 0; i < ix->n_macro_refers; i++) {
+        ReferEntry *r = &ix->macro_refers[i];
+        if (r->used) continue;
+        if (sib && refer_used_in(sib, r->name, r->ns)) continue;
         push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNUSED_REFERRED_VAR,
                   msg_printf("referred var %s/%s is never used",
                              r->ns ? r->ns : "?", r->name));
@@ -2547,7 +2771,7 @@ static void analyze_toplevel_require(FileNode *f, NsIndex *ix, const char *text,
     while (!ts_node_is_null(arg = nth_form(list, k))) {
         TSNode spec = unwrap_quote(unwrap_meta(arg));
         if (!ts_node_is_null(spec) && !type_is(spec, "keyword"))
-            parse_require_spec(ix, text, feat, spec, from_use);
+            parse_require_spec(ix, text, feat, spec, from_use, 0);
         k++;
     }
 }
@@ -2564,7 +2788,7 @@ static void analyze_toplevel_alias(FileNode *f, NsIndex *ix, const char *text,
         !type_is(al, "symbol") || !type_is(ns, "symbol"))
         return;
     char *ns_str = node_text_dup(text, ns);
-    push_alias(ix, text, al, ns_str);
+    push_alias(ix, 0, text, al, ns_str);
     free(ns_str); // push_alias copied it
 }
 
@@ -3345,6 +3569,14 @@ static void build_require_graph(Workspace *ws, FileNode *f, NsIndex *ix,
         r->resolved = resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
                                       ws->n_classpath, r->ns, mask, f->path);
     }
+    // Macro requires always resolve on the CLJ side (`.clj'/`.cljc'), regardless
+    // of the requiring file's dialect -- ClojureScript macros are Clojure code.
+    for (size_t i = 0; i < ix->n_macro_requires; i++) {
+        ReqSpec *r = &ix->macro_requires[i];
+        if (!r->ns) continue;
+        r->resolved = resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
+                                      ws->n_classpath, r->ns, DIA_CLJ, f->path);
+    }
 }
 
 // ===========================================================================
@@ -3376,6 +3608,17 @@ static int dep_defines_var(NsIndex *dix, const char *name, size_t len) {
     return 0;
 }
 
+// Does DIX define a MACRO named NAME[0,LEN)?  Used for ClojureScript clj-side
+// resolution: through a macro alias/refer or implicit macro loading, a cljs
+// requirer sees only the clj namespace's macros -- never its (clj-only) fns.
+static int dep_defines_macro(NsIndex *dix, const char *name, size_t len) {
+    for (size_t v = 0; v < dix->n_vars; v++)
+        if (dix->vars[v].is_macro && strlen(dix->vars[v].name) == len &&
+            memcmp(dix->vars[v].name, name, len) == 0)
+            return 1;
+    return 0;
+}
+
 // Find the var named NAME[0,LEN) in IX, preferring a real definition over a bare
 // `(declare ...)` of the same name (so jump-to-def lands on the def, not the
 // forward decl).  Returns NULL when no var of that name is defined.
@@ -3395,6 +3638,15 @@ static ReqSpec *find_require_by_ns(NsIndex *ix, const char *ns) {
     for (size_t i = 0; i < ix->n_requires; i++)
         if (ix->requires[i].ns && strcmp(ix->requires[i].ns, ns) == 0)
             return &ix->requires[i];
+    return NULL;
+}
+
+// The first MACRO require whose namespace equals NS, or NULL.  Its `resolved'
+// edge points at the clj-side dependency (build_require_graph, DIA_CLJ).
+static ReqSpec *find_macro_require_by_ns(NsIndex *ix, const char *ns) {
+    for (size_t i = 0; i < ix->n_macro_requires; i++)
+        if (ix->macro_requires[i].ns && strcmp(ix->macro_requires[i].ns, ns) == 0)
+            return &ix->macro_requires[i];
     return NULL;
 }
 
@@ -3454,6 +3706,19 @@ static void lint_unresolved_namespace(Workspace *ws, FileNode *f, NsIndex *ix) {
         push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNRESOLVED_NAMESPACE,
                   msg_printf("unresolved namespace %s", r->ns));
     }
+    // A macro require (`:require-macros'/`:refer-macros'/`:include-macros') whose
+    // clj-side edge is NULL: the macro namespace does not exist on the classpath.
+    for (size_t i = 0; i < ix->n_macro_requires; i++) {
+        ReqSpec *r = &ix->macro_requires[i];
+        if (!r->ns || r->resolved) continue;
+        if (r->as_alias) continue;
+        // A `.cljc' self-require of its own macros (`(ns foo (:require-macros
+        // [foo ...]))') never resolves -- `resolve_ns' skips the requiring file --
+        // but is idiomatic and provided in-file, so it is not unresolved.
+        if (ix->ns_name && strcmp(r->ns, ix->ns_name) == 0) continue;
+        push_diag(f, r->start, r->end, SEV_WARNING, DIAG_UNRESOLVED_NAMESPACE,
+                  msg_printf("unresolved namespace %s", r->ns));
+    }
 }
 
 // Resolve every recorded cross-ns / bare usage against the require graph and
@@ -3478,21 +3743,51 @@ static void resolve_var_usages(Workspace *ws, FileNode *f, NsIndex *ix,
     for (size_t u = 0; u < ix->n_usages; u++) {
         VarUsage *use = &ix->usages[u];
         size_t nlen = strlen(use->name);
-        if (use->ns) { // qualified / `:refer'-ed
-            FileNode *dep = NULL;
-            NsIndex *dix = NULL;
+        if (use->ns) { // qualified / `:refer'-ed (runtime or macro)
+            // A use site cannot tell a macro call from a fn call, so the var is
+            // defined if EITHER the runtime dependency (the requiring platform's
+            // surface) OR the clj-side macro dependency of the same ns defines it.
+            // `undefined-var' fires only when at least one edge resolved (a read we
+            // can trust) yet none defines the name.
+            int resolved_any = 0, defined = 0;
             if (ix->ns_name && strcmp(use->ns, ix->ns_name) == 0) {
-                dep = f;
-                dix = ix; // fully-qualified self-ref (this dialect)
-            } else {
+                resolved_any = 1; // fully-qualified self-ref (this dialect)
+                if (dep_defines_var(ix, use->name, nlen)) defined = 1;
+            }
+            if (!defined) { // runtime require graph
                 ReqSpec *r = find_require_by_ns(ix, use->ns);
-                if (r && r->resolved) {
-                    dep = r->resolved;
-                    dix = dep_surface(dep, mask);
+                if (r && r->resolved && !r->resolved->opaque) {
+                    resolved_any = 1;
+                    if (dep_defines_var(dep_surface(r->resolved, mask), use->name, nlen))
+                        defined = 1;
                 }
             }
-            if (!dep || dep->opaque) continue; // unresolved/source-less: not our call
-            if (dep_defines_var(dix, use->name, nlen)) continue;
+            if (!defined) { // explicit macro require graph (clj-side MACROS only)
+                ReqSpec *mr = find_macro_require_by_ns(ix, use->ns);
+                if (mr && mr->resolved && !mr->resolved->opaque) {
+                    resolved_any = 1;
+                    if (dep_defines_macro(dep_surface(mr->resolved, DIA_CLJ), use->name, nlen))
+                        defined = 1;
+                }
+            }
+            // ClojureScript implicit macro loading: the MACROS of a plainly
+            // `:require'd namespace (its `.clj'/`.cljc' companion) are usable
+            // through the alias without `:require-macros'.  When the runtime dep
+            // (e.g. the `.cljs' half of a split ns, or a `.cljc' whose macro is
+            // clj-only) does not define the name, consult the clj companion of the
+            // same runtime-required ns -- but only its MACROS, so a clj-only fn
+            // never leaks to a cljs requirer.  Gated to cljs passes.
+            if (!defined && mask == DIA_CLJS && find_require_by_ns(ix, use->ns)) {
+                FileNode *cdep = resolve_ns_memo(cache, ws, (const char *const *)ws->classpath,
+                                                 ws->n_classpath, use->ns, DIA_CLJ, f->path);
+                if (cdep && !cdep->opaque) {
+                    resolved_any = 1;
+                    if (dep_defines_macro(dep_surface(cdep, DIA_CLJ), use->name, nlen))
+                        defined = 1;
+                }
+            }
+            if (defined) continue;
+            if (!resolved_any) continue; // unresolved/source-less: not our call
             push_diag(f, use->start, use->end, SEV_WARNING, DIAG_UNDEFINED_VAR,
                       msg_printf("var %s/%s is undefined", use->ns, use->name));
             if (ws->classpath_complete)
@@ -3618,11 +3913,9 @@ static void analyze_dialect_pass(Workspace *ws, FileNode *f, NsIndex *ix,
 
     // --- Full-check-only facts -------------------------------------------
     if (cross_file) {
-        // `unused-namespace' / `unused-referred-var': buffer-determinable -- the
-        // scope pass already flagged each used require / referred var above, so
-        // this reads no dependencies.  Emitted only here (not the fast check) so
-        // it does not flash on every edit.
-        lint_unused_requires(f, ix);
+        // `unused-namespace' / `unused-referred-var' is emitted AFTER both dialect
+        // passes (by analyze_file), so a `.cljc' require/refer used on either
+        // platform is not falsely flagged by the other pass -- see there.
         // The forward require graph: resolve each require to its dependency
         // FileNode over the classpath (lazy, mtime-gated).  This DOES read
         // dependencies -- the module's only check-time dependency I/O -- but emits
@@ -3682,6 +3975,21 @@ static void analyze_file(Workspace *ws, FileNode *f, int cross_file, NsCache *ca
         analyze_dialect_pass(ws, f, targets[di], feats[di], masks[di], root,
                              cross_file, cache);
     f->multi_dialect = (ndia == 2);
+
+    // `unused-namespace' / `unused-referred-var' (full check): emitted here, after
+    // BOTH dialect passes, so each surface's lint can see the OTHER platform's
+    // `used' flags -- a `.cljc' require/refer consumed only in a `#?(:cljs ...)'
+    // branch is used, not unused.  For a `.cljc' both surfaces are linted (the
+    // sibling is the other); the shared truly-unused entries emit twice and are
+    // collapsed by `dedup_diags' below.  A single-dialect file lints once, no sibling.
+    if (cross_file) {
+        if (ndia == 2) {
+            lint_unused_requires(f, &f->index, &f->alt_index);
+            lint_unused_requires(f, &f->alt_index, &f->index);
+        } else {
+            lint_unused_requires(f, &f->index, NULL);
+        }
+    }
 
     if (ndia == 2) { // collapse the two passes' shared outputs
         dedup_diags(f);
@@ -3905,12 +4213,33 @@ static emacs_value location_to_lisp(emacs_env *env, FileNode *f,
     return env->funcall(env, env->intern(env, "list"), 6, pl);
 }
 
-// The innermost `symbol' node covering BYTE, or a null node.
+// The `symbol' node BYTE refers to, or a null/non-symbol node.  Walks up to the
+// enclosing symbol; if BYTE instead lands on the reader-macro prefix of a
+// var-quote (`#'x') or a plain quote (`'x') -- which `bounds-of-thing-at-point'
+// folds into the symbol, so a jump-to-def / find-usages point query can land
+// there -- descend the wrapper to its target symbol (both name a var; a quoted
+// symbol is navigable even though the scope pass leaves quoted data usage-less).
 static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
     TSNode root = ts_tree_root_node(f->tree);
     TSNode n = ts_node_descendant_for_byte_range(root, byte, byte);
-    while (!ts_node_is_null(n) && !type_is(n, "symbol")) n = ts_node_parent(n);
+    for (TSNode c = n; !ts_node_is_null(c); c = ts_node_parent(c)) {
+        if (type_is(c, "symbol")) return c;
+        if (type_is(c, "var_quote") || type_is(c, "quote")) {
+            TSNode tgt = unwrap_meta(ts_node_child_by_field_name(c, "target", 6));
+            return (!ts_node_is_null(tgt) && type_is(tgt, "symbol")) ? tgt : c;
+        }
+    }
     return n;
+}
+
+// Normalize a point-query BYTE to the start of the symbol it refers to (folding a
+// `#'' var-quote prefix onto its target), so the nav/identity lookups below key
+// off the symbol, not a reader-macro prefix `bounds-of-thing-at-point' swept in.
+static uint32_t normalize_query_byte(FileNode *f, uint32_t byte) {
+    TSNode at = symbol_at_byte(f, byte);
+    if (!ts_node_is_null(at) && type_is(at, "symbol"))
+        return ts_node_start_byte(at);
+    return byte;
 }
 
 // Resolve the cross-namespace var named by SYM -- a qualified `alias/name' (or
@@ -3929,20 +4258,30 @@ static TSNode symbol_at_byte(FileNode *f, uint32_t byte) {
 // consult `index'.
 static const char *file_alias_ns(FileNode *f, const char *alias, size_t len) {
     NsIndex *surf[2] = {&f->index, &f->alt_index};
-    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++)
+    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++) {
         for (size_t i = 0; i < surf[s]->n_aliases; i++)
             if (strlen(surf[s]->aliases[i].alias) == len &&
                 memcmp(surf[s]->aliases[i].alias, alias, len) == 0)
                 return surf[s]->aliases[i].ns;
+        for (size_t i = 0; i < surf[s]->n_macro_aliases; i++)
+            if (strlen(surf[s]->macro_aliases[i].alias) == len &&
+                memcmp(surf[s]->macro_aliases[i].alias, alias, len) == 0)
+                return surf[s]->macro_aliases[i].ns;
+    }
     return NULL;
 }
 static const char *file_refer_ns(FileNode *f, const char *name, size_t len) {
     NsIndex *surf[2] = {&f->index, &f->alt_index};
-    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++)
+    for (size_t s = 0, n = f->multi_dialect ? 2 : 1; s < n; s++) {
         for (size_t i = 0; i < surf[s]->n_refers; i++)
             if (strlen(surf[s]->refers[i].name) == len &&
                 memcmp(surf[s]->refers[i].name, name, len) == 0)
                 return surf[s]->refers[i].ns;
+        for (size_t i = 0; i < surf[s]->n_macro_refers; i++)
+            if (strlen(surf[s]->macro_refers[i].name) == len &&
+                memcmp(surf[s]->macro_refers[i].name, name, len) == 0)
+                return surf[s]->macro_refers[i].ns;
+    }
     return NULL;
 }
 static const VarDef *file_find_vardef(FileNode *f, const char *name, size_t len) {
@@ -3975,7 +4314,18 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
         }
     } else {                                    // bare: a referred var
         target_ns = file_refer_ns(f, nm, nlen); // refer (either dialect)
-        if (!target_ns) return NULL;            // same-ns/core/unresolved
+        if (!target_ns) {
+            // Not referred: it may name a var defined in THIS file.  A live bare
+            // usage already resolves via its NAV_VAR, so this matters for a bare
+            // symbol the scope pass left nav-less -- notably a quoted `'foo' (data,
+            // so no usage recorded) whose name is an in-file var.
+            const VarDef *vd = file_find_vardef(f, nm, nlen);
+            if (vd) {
+                if (out) *out = vd;
+                return f;
+            }
+            return NULL; // core / unresolved
+        }
     }
 
     // A fully-qualified reference to the file's OWN namespace (`my.ns/foo`
@@ -3995,16 +4345,27 @@ static FileNode *resolve_cross_ns_var(Workspace *ws, FileNode *f, TSNode sym,
     FileNode *dep = resolve_ns(ws, (const char *const *)ws->classpath,
                                ws->n_classpath, target_ns,
                                dialect_mask(f->path), f->path);
-    free(lit); // resolve_ns copied what it needed
-    if (!dep) return NULL;
     // Search the dependency's primary surface, then -- for a `.cljc' dep -- its
     // cljs surface, so jump-to-def lands on a `:cljs'-only var too.
-    const VarDef *vd = file_find_vardef(dep, nm, nlen);
-    if (vd) {
-        if (out) *out = vd;
-        return dep;
+    const VarDef *vd = dep ? file_find_vardef(dep, nm, nlen) : NULL;
+    // Not found on the requiring platform -- the target may be a MACRO, which
+    // lives on the clj side (`:require-macros'/`:refer-macros', or the `.clj'
+    // companion of a same-named runtime ns).  Retry with the clj mask.
+    if (!vd && dialect_mask(f->path) != DIA_CLJ) {
+        FileNode *mdep = resolve_ns(ws, (const char *const *)ws->classpath,
+                                    ws->n_classpath, target_ns, DIA_CLJ, f->path);
+        if (mdep && mdep != dep) {
+            const VarDef *mvd = file_find_vardef(mdep, nm, nlen);
+            if (mvd) {
+                dep = mdep;
+                vd = mvd;
+            }
+        }
     }
-    return NULL;
+    free(lit); // resolve_ns copied what it needed
+    if (!dep || !vd) return NULL;
+    if (out) *out = vd;
+    return dep;
 }
 
 // `treejure-definition's cross-namespace case: wrap resolve_cross_ns_var to a
@@ -4036,7 +4397,7 @@ static emacs_value f_definition(emacs_env *env, ptrdiff_t nargs, emacs_value arg
 
     intmax_t byte_arg = extract_byte_arg(env, args[2]);
     if (byte_arg < 0) return Qnil(env);
-    uint32_t byte = (uint32_t)byte_arg;
+    uint32_t byte = normalize_query_byte(f, (uint32_t)byte_arg);
     NavRef *r = nav_at(f, byte);
     if (r && r->kind == NAV_LOCAL) {
         for (size_t i = 0; i < f->nnavs; i++) {
@@ -4221,7 +4582,7 @@ static emacs_value f_references(emacs_env *env, ptrdiff_t nargs, emacs_value arg
 
     intmax_t byte_arg = extract_byte_arg(env, args[2]);
     if (byte_arg < 0) return Qnil(env);
-    uint32_t byte = (uint32_t)byte_arg;
+    uint32_t byte = normalize_query_byte(f, (uint32_t)byte_arg);
     NavRef *r = nav_at(f, byte);
 
     // --- Locals: buffer-scoped, matched by binding id (the original path). ---
@@ -4554,6 +4915,14 @@ static emacs_value f_jar_entry(emacs_env *env, ptrdiff_t nargs, emacs_value args
     return res;
 }
 
+// Do the two def-form lists differ (order-sensitively)?
+static int def_forms_changed(char **a, size_t na, char **b, size_t nb) {
+    if (na != nb) return 1;
+    for (size_t i = 0; i < na; i++)
+        if (strcmp(a[i], b[i]) != 0) return 1;
+    return 0;
+}
+
 // (treejure-set-def-forms WS NAMES) -> nil.  NAMES is a list/vector of macro
 // name strings analysed like `defn` (the `replique-clojure-extra-def-forms`).
 static emacs_value f_set_def_forms(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d) {
@@ -4569,10 +4938,24 @@ static emacs_value f_set_def_forms(emacs_env *env, ptrdiff_t nargs, emacs_value 
         free(forms);
         return Qnil(env);
     }
+    int changed = def_forms_changed(ws->def_forms, ws->n_def_forms, forms, n);
     for (size_t i = 0; i < ws->n_def_forms; i++) free(ws->def_forms[i]);
     free(ws->def_forms);
     ws->def_forms = forms;
     ws->n_def_forms = n;
+    // A dependency's var surface depends on the def-forms (an extra-def-form
+    // interns the vars it defines).  Cached non-live deps were distilled under the
+    // OLD def-forms, so invalidate them: drop their mtime/level gate so the next
+    // `index_disk_file' re-reads and re-distills under the new def-forms.  Live
+    // buffers re-analyse on their next check (they never hit the cache path), and
+    // jars are library code the project's def-forms do not apply to -- both skipped.
+    if (changed)
+        for (size_t i = 0; i < ws->n_files; i++) {
+            FileNode *f = ws->files[i];
+            if (f->live || f->is_jar) continue;
+            f->analysis_level = ANALYSIS_NONE;
+            f->indexed_mtime = 0;
+        }
     return Qnil(env);
 }
 

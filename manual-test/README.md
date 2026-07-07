@@ -112,7 +112,12 @@ slice.)
 | `src/manualtest/protocol_types.clj` | secondary var interning: `defprotocol`/`definterface` method vars + `deftype`/`defrecord` factory vars (`->Name`, `map->Name`) are interned so `M-.`/`M-?` reach their usages (no var face) |
 | `src/manualtest/grammar_errors.clj` | all grammar-level diagnostics (this file is **intentionally broken**) |
 | `src/manualtest/extra_def_forms.clj` | user macros analysed like `defn` (see `.dir-locals.el`) |
+| `src/manualtest/edf_defs.cljs` / `edf_user.cljs` | cross-namespace resolution of vars defined by an extra-def-form (`defcomponent`/`defroute`) in cljs: they resolve (not `undefined-var`) once def-forms are pushed, and `treejure-set-def-forms` re-distills already-cached deps |
 | `src/manualtest/cljs_demo.cljs`     | ClojureScript buffer (same local analysis) |
+| `src/manualtest/macro_defs.clj`     | a pure-clj macro namespace consumed from cljs (the macro-require graph's clj side) |
+| `src/manualtest/split.clj` / `split.cljs` | a split runtime/macro namespace: macros in `.clj`, runtime fns in `.cljs`, same ns name |
+| `src/manualtest/macro_user.cljs`    | cljs macro resolution: `:require-macros`/`:use-macros` + `:refer-macros`/`:include-macros` resolve on the clj side (separate macro-require graph), so a macro call is not `undefined-var`; a genuinely missing macro still is; `M-.` on a macro jumps into its `.clj` |
+| `src/manualtest/implicit_user.cljs` | cljs **implicit macro loading**: a plain `:require` (no `:require-macros`) of a clj-only or split macro ns still resolves its **macros** through the alias — but only macros, never a clj-only fn (that stays `undefined-var`) |
 | `src/manualtest/reader_conditionals.cljc` | `.cljc` reader conditionals; branch-aware var defs (`:clj` honored) |
 | `src/manualtest/cond_requires.cljc` | requires nested in a reader conditional (`#?`/`#?@` splicing) are extracted + linted for the file's dialect (`:clj`); diffs byte-identical to clj-kondo |
 | `src/manualtest/global_vars.clj`    | the var-face decision: vars get **no** semantic face (treesit colors them), locals do; shadowing → `:local`; resolution still drives `M-.` |
